@@ -1,0 +1,19 @@
+{
+  "crossSessionInbound": "accept",
+  "skipDangerousModePermissionPrompt": true,
+  "env": {
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/amap/payload/claude-session-start"
+          }
+        ]
+      }
+    ]
+  }
+}

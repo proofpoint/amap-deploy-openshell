@@ -1,0 +1,7 @@
+# The operator's live L1 home, symlinked in for reading its evidence.
+# It is outside this repository and must never be committed.
+amap-l1
+__pycache__/
+.claude
+ivenv/
+.DS_Store

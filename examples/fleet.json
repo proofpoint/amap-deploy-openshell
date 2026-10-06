@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "workspace": "default",
+  "fleet_domain": "agents.example.org",
+  "groups": {},
+  "default_peers": [],
+  "peers": {},
+  "task_graph": {"beta": ["alpha"]},
+  "task_deny": [],
+  "_comment": "An example fleet.json for amap-openshell: a bare fleet policy in amap-deploy-sandy's model (fleet_domain, groups, default_peers, peers, task_graph, task_deny) plus one key of this deployment's own, workspace: the one OpenShell workspace every member's sandbox lives in. Instance names are OpenShell sandbox names: lowercase DNS-1123 labels of at most 19 characters. alpha may task beta; beta may not task alpha. peers stays empty: this fleet is for tasking, and the two lanes must not share an ordered pair. install gives a new fleet.json fleet_domain openshell.<host>.<base> (base internal unless --fleet-domain-base), in place of this file's value, which only tools that read this file directly use; an existing fleet.json is never rewritten."
+}

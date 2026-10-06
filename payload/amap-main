@@ -1,0 +1,148 @@
+#!/bin/sh
+# payload/amap-main: the sandbox's main process, shipped by
+# amap-deploy-openshell on the read-only payload.
+#
+# OpenShell supervises exactly one process, the command after `--` on
+# `openshell sandbox create` (OpenShell main@acbac9c:
+# docs/how-it-works/sandboxes/overview.mdx:23). This file is that command. It
+# runs the connector's delivery daemon, inbox-delivery, in a restart loop of
+# its own, then runs `claude` with the arguments it was given, and exits with
+# claude's status. That exit is what `--restart-policy on-failure` acts on
+# (overview.mdx:36-48).
+#
+# It is a constant: every path is derived from the environment, so nothing in
+# it differs between two sandboxes or two hosts. The daemon's contract is the
+# AMAP_DELIVERY_* variables (amap-connector-claude, bin/inbox-delivery), and
+# this file translates this deployment's inputs into them. The inputs are set
+# host-side with `--env`, which every process in the sandbox sees
+# (overview.mdx:366-374):
+#
+#   AMAP_INBOX_DIR, AMAP_PEER_DIR, AMAP_OUTBOX_DIR   required: the lane mounts
+#   AMAP_SELF_ADDRESS    optional: this agent's address, <name>@<fleet_domain>
+#   ANTHROPIC_API_KEY    required by claude-seed: the provider's placeholder
+#                        (OpenShell main@acbac9c:
+#                        docs/how-it-works/providers/overview.mdx:366-369)
+#
+# HOME is required too: the daemon's private state lives under it. Before
+# anything starts, the wrapper seeds Claude Code's first-run answers (D9).
+set -u
+
+# The directory this script is in: the read-only payload. The daemon, its
+# module and the session lister are its neighbours, and are found no other way.
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+
+# ${VAR:?} exits nonzero naming the variable, before anything starts: a
+# guessed path is a wrong path used silently, the daemon's own rule.
+: "${AMAP_INBOX_DIR:?amap-main: AMAP_INBOX_DIR is not set; the inbox lane has no mount target, so there is nothing to watch}"
+: "${AMAP_PEER_DIR:?amap-main: AMAP_PEER_DIR is not set; the peer lane has no mount target, so there is nothing to watch}"
+: "${AMAP_OUTBOX_DIR:?amap-main: AMAP_OUTBOX_DIR is not set; the outbox lane has no mount target, so there is nowhere to write}"
+: "${HOME:?amap-main: HOME is not set; the delivery daemon keeps its private state under it}"
+
+# The daemon sees only the AMAP_DELIVERY_* variables derived below. Any
+# inherited one is dropped, including the receipt-window tuning knob, which
+# no policy records.
+for name in $(env | sed -n 's/^\(AMAP_DELIVERY_[A-Za-z0-9_]*\)=.*/\1/p'); do
+    unset "$name"
+done
+
+# The daemon's private state: its claims and its delivered ledger.
+AMAP_CONNECTOR="$HOME/.claude/connector"
+
+AMAP_DELIVERY_MAIL_NOTICE_DIR="$AMAP_INBOX_DIR/notices"
+AMAP_DELIVERY_MAIL_CLAIM="$AMAP_CONNECTOR/claims/mail.amap-consumer.json"
+AMAP_DELIVERY_PEER_NOTICE_DIR="$AMAP_PEER_DIR/notices"
+AMAP_DELIVERY_PEER_MESSAGE_DIR="$AMAP_PEER_DIR/messages"
+AMAP_DELIVERY_PEER_CLAIM="$AMAP_CONNECTOR/claims/peer.amap-consumer.json"
+AMAP_DELIVERY_STATE_DIR="$AMAP_CONNECTOR/delivery-state"
+# The router reads outcomes from the outbox's connector side channel; the
+# daemon creates this directory on its first write.
+AMAP_DELIVERY_OUTCOME_DIR="$AMAP_OUTBOX_DIR/ext/claude-code/outcomes"
+AMAP_DELIVERY_SESSION_SOURCE="$SELF_DIR/openshell-sessions"
+export AMAP_DELIVERY_MAIL_NOTICE_DIR AMAP_DELIVERY_MAIL_CLAIM AMAP_DELIVERY_PEER_NOTICE_DIR AMAP_DELIVERY_PEER_MESSAGE_DIR AMAP_DELIVERY_PEER_CLAIM AMAP_DELIVERY_STATE_DIR AMAP_DELIVERY_OUTCOME_DIR AMAP_DELIVERY_SESSION_SOURCE
+
+# The address is optional because the daemon keeps it optional: a fleet with
+# no fleet_domain has no peer lane and no address. Set but empty is a bad
+# render, and fatal.
+if [ -n "${AMAP_SELF_ADDRESS+x}" ]; then
+    : "${AMAP_SELF_ADDRESS:?amap-main: AMAP_SELF_ADDRESS is set but empty; the host rendered no address}"
+    AMAP_DELIVERY_SELF=$AMAP_SELF_ADDRESS
+    export AMAP_DELIVERY_SELF
+fi
+
+# Claude Code's first-run answers (D9) are merged into $HOME/.claude.json
+# before the daemon or claude starts, so no first-run question waits for a
+# keyboard. A seed that fails starts nothing.
+if ! "$SELF_DIR/claude-seed" </dev/null; then
+    echo "amap-main: claude-seed could not seed Claude Code's first-run answers; nothing is started" >&2
+    exit 1
+fi
+
+# The restart loop's backoff, in seconds. Each restart waits, starting at
+# BACKOFF_FIRST_SECONDS and doubling up to BACKOFF_MAX_SECONDS; a daemon that
+# ran for HEALTHY_AFTER_SECONDS starts the sequence again.
+BACKOFF_FIRST_SECONDS=1
+BACKOFF_MAX_SECONDS=60
+HEALTHY_AFTER_SECONDS=60
+
+# Runs the daemon until SIGTERM. The daemon and each wait run in the
+# background and are waited on, because a trap runs only once a foreground
+# command finishes. SIGTERM goes to the daemon, which releases its consumer
+# claims, and the loop waits for it to exit. This file never deletes a claim.
+supervise() {
+    stopping=
+    child=
+    trap 'stopping=1; if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null; fi' TERM
+    delay=$BACKOFF_FIRST_SECONDS
+    while [ -z "$stopping" ]; do
+        started=$(date +%s 2>/dev/null) || started=0
+        "$SELF_DIR/inbox-delivery" </dev/null &
+        child=$!
+        if [ -n "$stopping" ]; then kill -TERM "$child" 2>/dev/null; fi
+        wait "$child"
+        rc=$?
+        if [ -n "$stopping" ]; then
+            wait "$child" 2>/dev/null
+            break
+        fi
+        ended=$(date +%s 2>/dev/null) || ended=0
+        if [ $((ended - started)) -ge "$HEALTHY_AFTER_SECONDS" ]; then
+            delay=$BACKOFF_FIRST_SECONDS
+        fi
+        echo "amap-main: inbox-delivery exited with status $rc; restarting in ${delay}s" >&2
+        sleep "$delay" </dev/null &
+        child=$!
+        if [ -n "$stopping" ]; then kill -TERM "$child" 2>/dev/null; fi
+        wait "$child"
+        child=
+        delay=$((delay * 2))
+        if [ "$delay" -gt "$BACKOFF_MAX_SECONDS" ]; then
+            delay=$BACKOFF_MAX_SECONDS
+        fi
+    done
+    exit 0
+}
+
+supervise &
+supervisor=$!
+
+# claude runs in the background so this shell can forward signals and then
+# stop the daemon. A background command's stdin would be /dev/null, so the
+# terminal is handed over on fd 3.
+exec 3<&0
+claude "$@" 0<&3 3<&- &
+claude_pid=$!
+exec 3<&-
+trap 'kill -TERM "$claude_pid" 2>/dev/null' TERM
+trap 'kill -HUP "$claude_pid" 2>/dev/null' HUP
+trap 'kill -INT "$claude_pid" 2>/dev/null' INT
+
+# A trapped signal interrupts `wait`; claude is waited on until it has exited.
+while :; do
+    wait "$claude_pid"
+    status=$?
+    kill -0 "$claude_pid" 2>/dev/null || break
+done
+
+kill -TERM "$supervisor" 2>/dev/null
+wait "$supervisor"
+exit "$status"

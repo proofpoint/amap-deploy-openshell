@@ -1,0 +1,933 @@
+<!doctype html>
+<!-- Design, CSS, script and the generic AMAP screens adapted from amap-deploy-sandy's docs/index.html (Apache-2.0). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AMAP on OpenShell</title>
+<meta name="description" content="A step-by-step walkthrough of the Agent Mailbox Access Protocol on OpenShell: why agents run isolated, how the router and the connector meet at a directory tree, how OpenShell supplies each property AMAP needs, the mounts interceptor, how to run it yourself, and what the live runs proved.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=JetBrains+Mono:wght@400;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap">
+<style>
+:root{
+  color-scheme: light;
+  --paper:#f2f4f2; --panel:#ffffff; --ink:#17201d; --muted:#56635e; --rule:#d5dcd8;
+  --trust:#0f6b5c; --trust-soft:#dcefe9;
+  --agent:#a86a12; --agent-soft:#f7ead3;
+  --refuse:#b83227; --refuse-soft:#f8e0dc;
+  --ro:#2f5f93; --ro-soft:#e1ebf6;
+  --code:#e8ece9; --term:#17201d; --term-ink:#e4ebe7; --term-muted:#8fa19a;
+  --display:"Bricolage Grotesque", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --body:"Source Serif 4", Charter, "Iowan Old Style", Georgia, serif;
+  --mono:"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --paper:#111715; --panel:#18201d; --ink:#e4ebe7; --muted:#9aa8a2; --rule:#2c3833;
+    --trust:#4cc3a8; --trust-soft:#153a31;
+    --agent:#e2a64a; --agent-soft:#3a2b12;
+    --refuse:#f0776b; --refuse-soft:#3d1b17;
+    --ro:#7fb0e6; --ro-soft:#172a40;
+    --code:#1f2926; --term:#0b100e; --term-ink:#e4ebe7; --term-muted:#7f918a;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --paper:#111715; --panel:#18201d; --ink:#e4ebe7; --muted:#9aa8a2; --rule:#2c3833;
+  --trust:#4cc3a8; --trust-soft:#153a31;
+  --agent:#e2a64a; --agent-soft:#3a2b12;
+  --refuse:#f0776b; --refuse-soft:#3d1b17;
+  --ro:#7fb0e6; --ro-soft:#172a40;
+  --code:#1f2926; --term:#0b100e; --term-ink:#e4ebe7; --term-muted:#7f918a;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.55 var(--body);-webkit-font-smoothing:antialiased;overflow:hidden}
+a{color:var(--trust);text-underline-offset:2px}
+a:focus-visible,button:focus-visible,summary:focus-visible{outline:2px solid var(--trust);outline-offset:2px;border-radius:3px}
+code{font-family:var(--mono);font-size:.84em;background:var(--code);padding:.06em .34em;border-radius:3px}
+h1,h2,h3{font-family:var(--display);line-height:1.1;text-wrap:balance;margin:0}
+h2{font-size:clamp(1.5rem,3vw,2.2rem);font-weight:700;letter-spacing:-.01em}
+h3{font-size:1.02rem;font-weight:700}
+p{margin:0}
+.eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+
+/* ---------- app frame: header · stage · controls ---------- */
+.app{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto}
+.top{padding:12px 24px 10px;padding-top:calc(12px + env(safe-area-inset-top,0px));display:grid;gap:8px;border-bottom:1px solid var(--rule);background:var(--paper)}
+.top-row{display:flex;justify-content:space-between;align-items:baseline;gap:16px}
+.brand{font-family:var(--display);font-weight:700;font-size:1rem}
+.where{font-family:var(--mono);font-size:.74rem;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+.chapters{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:4px}
+.chapters button{appearance:none;border:0;background:transparent;padding:6px 0 0;cursor:pointer;text-align:left;display:grid;gap:5px;color:var(--muted);font:500 .74rem/1.2 var(--display);min-width:0}
+.chapters .fill{height:4px;border-radius:2px;background:var(--rule);position:relative;overflow:hidden}
+.chapters .fill i{position:absolute;inset:0;width:0;background:var(--trust);transition:width .3s}
+.chapters .lbl{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chapters button[aria-current="step"]{color:var(--ink)}
+.stage{min-height:0;overflow:hidden;position:relative}
+.screen{position:absolute;inset:0;overflow:auto;padding:18px 24px;display:flex;align-items:center;justify-content:center}
+.screen[hidden]{display:none}
+.inner{width:100%;max-width:1080px;display:grid;gap:12px;animation:in .35s ease-out;margin:auto 0}
+@keyframes in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion: reduce){.inner{animation:none}.chapters .fill i{transition:none}}
+.lede{font-size:1.1rem;max-width:66ch}
+.body{max-width:66ch}
+.controls{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 24px;padding-bottom:calc(12px + env(safe-area-inset-bottom,0px));border-top:1px solid var(--rule);background:var(--paper)}
+.controls button{font:700 .95rem/1 var(--display);height:44px;padding:0 20px;border-radius:8px;border:1px solid var(--rule);background:var(--panel);color:var(--ink);cursor:pointer}
+.controls button.next{background:var(--trust);border-color:var(--trust);color:var(--paper);min-width:140px}
+.controls button:disabled{opacity:.4;cursor:default}
+.hint{font-family:var(--mono);font-size:.72rem;color:var(--muted);text-align:center}
+
+/* ---------- screen furniture ---------- */
+.hero h1{font-size:clamp(2.3rem,6vw,4.4rem);font-weight:700;letter-spacing:-.02em;max-width:14ch}
+.hero .ask{color:var(--agent)} .hero .act{color:var(--trust)}
+.invariant{max-width:66ch;border-left:3px solid var(--trust);padding:4px 0 4px 18px;font-style:italic}
+.invariant b{font-style:normal;font-family:var(--mono);font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--trust);display:block;margin-bottom:4px}
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--rule);border-radius:9px;padding:13px 16px;display:grid;gap:6px;align-content:start}
+.card p{font-size:.95rem;color:var(--muted)}
+.tag{font-family:var(--mono);font-size:.66rem;letter-spacing:.08em;text-transform:uppercase;padding:2px 7px;border-radius:4px;white-space:nowrap;justify-self:start}
+.tag.t{background:var(--trust-soft);color:var(--trust)} .tag.u{background:var(--agent-soft);color:var(--agent)} .tag.n{background:var(--code);color:var(--muted)}
+.repo{font-family:var(--mono);font-size:.78rem;color:var(--muted)}
+.card header{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.practices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.practice{background:var(--panel);border:1px solid var(--rule);border-radius:9px;padding:14px 16px;display:grid;gap:4px}
+.practice .why{font-family:var(--mono);font-size:.74rem;color:var(--trust)}
+.practice p{font-size:.93rem;color:var(--muted)}
+.note{background:var(--agent-soft);border-radius:8px;padding:12px 16px;font-size:.95rem;max-width:74ch}
+.move{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) auto minmax(0,1fr);gap:10px}
+.move .step{background:var(--panel);border:1px solid var(--rule);border-radius:9px;padding:14px 16px;display:grid;gap:6px;align-content:start}
+.move .arrow{align-self:center;font-family:var(--mono);color:var(--muted)}
+.move .step.a{border-color:var(--agent)} .move .step.r{border-color:var(--trust)}
+.tablewrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:560px;font-size:.93rem}
+th{font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);text-align:left;padding:7px 10px;border-bottom:1px solid var(--rule)}
+td{padding:6px 10px;border-bottom:1px solid var(--rule);vertical-align:top}
+td.path{font-family:var(--mono);font-size:.82rem;white-space:nowrap}
+td.d1{padding-left:28px}
+td.strong{font-family:var(--display);font-weight:700}
+.mode{font-family:var(--mono);font-size:.7rem;padding:1px 6px;border-radius:4px;white-space:nowrap}
+.mode.ro{background:var(--ro-soft);color:var(--ro)} .mode.rw{background:var(--agent-soft);color:var(--agent)} .mode.host{background:var(--trust-soft);color:var(--trust)}
+.lane svg{width:100%;max-width:260px;height:auto}
+.lane ul{margin:0;padding-left:1.1em;font-size:.94rem;display:grid;gap:3px}
+.outcome b{font-family:var(--mono);font-size:.82rem;letter-spacing:.06em}
+.outcome.p b{color:var(--trust)} .outcome.f b{color:var(--refuse)} .outcome.u b{color:var(--agent)}
+.links{display:flex;flex-wrap:wrap;gap:10px}
+.links a{font:600 .92rem/1 var(--display);padding:12px 16px;border-radius:7px;text-decoration:none;border:1px solid var(--rule);color:var(--ink);background:var(--panel)}
+.links a.primary{background:var(--trust);border-color:var(--trust);color:var(--paper)}
+.paths{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:stretch}
+.path{background:var(--panel);border:1px solid var(--rule);border-radius:9px;padding:14px 16px;display:grid;gap:10px;align-content:start;min-width:0}
+.path h3{margin:0;font:700 1.02rem/1.2 var(--display)}
+.path h3 .n{display:inline-grid;place-items:center;width:1.6em;height:1.6em;margin-right:8px;border-radius:50%;background:var(--trust);color:var(--paper);font-size:.85rem}
+.path p{margin:0}
+.path .links{margin-top:auto}
+@media (max-width:760px){.paths{grid-template-columns:minmax(0,1fr)}}
+
+/* ---------- commands ---------- */
+.cmd{position:relative;background:var(--term);color:var(--term-ink);border-radius:9px;min-width:0}
+.cmd pre{margin:0;padding:14px 16px;overflow-x:auto;font:13px/1.6 var(--mono);white-space:pre}
+.cmd .c{color:var(--term-muted)}
+.cmd .label{display:flex;justify-content:space-between;align-items:center;padding:8px 10px 0 16px;font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--term-muted)}
+.copy{font:600 .7rem/1 var(--mono);letter-spacing:.04em;padding:6px 9px;border-radius:5px;border:1px solid var(--term-muted);background:transparent;color:var(--term-ink);cursor:pointer}
+.steps2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
+.small{font-size:.92rem;color:var(--muted)}
+.fileview{background:var(--code);border:1px solid var(--rule);border-radius:9px;min-width:0}
+.fileview .label{padding:8px 16px 0;font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.fileview pre{margin:0;padding:10px 16px 14px;overflow-x:auto;font:12.5px/1.6 var(--mono);white-space:pre;color:var(--ink)}
+.fields{display:grid;gap:7px;margin:0;font-size:.92rem}
+.fields div{display:grid;grid-template-columns:minmax(0,15ch) minmax(0,1fr);gap:10px}
+.fields dt{font-family:var(--mono);font-size:.82rem;color:var(--trust);overflow-wrap:anywhere}
+.fields dd{margin:0;color:var(--muted)}
+@media (max-width:640px){.fields div{grid-template-columns:minmax(0,1fr);gap:2px}}
+.req{display:flex;flex-wrap:wrap;gap:8px}
+.req span{font-family:var(--mono);font-size:.76rem;background:var(--panel);border:1px solid var(--rule);border-radius:5px;padding:4px 8px}
+.prompt{background:var(--panel);border-left:3px solid var(--agent);border-radius:0 8px 8px 0;padding:12px 16px;font-style:italic;max-width:74ch}
+
+/* ---------- flow screens ---------- */
+.flowhead{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 18px;align-items:end}
+.flowhead .count{font-family:var(--mono);font-size:.78rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.caption{font-size:1.05rem;min-height:2.4em;max-width:84ch}
+.scenebox{background:var(--panel);border:1px solid var(--rule);border-radius:10px;overflow-x:auto}
+.scenebox svg{display:block;width:100%;min-width:620px;height:auto;max-height:calc(100vh - 364px)}
+.fsteps{font-size:.86rem;color:var(--muted)}
+.fsteps summary{cursor:pointer;font-family:var(--mono);font-size:.72rem;letter-spacing:.06em;text-transform:uppercase}
+.fsteps ol{margin:8px 0 0;padding-left:1.3em;display:grid;gap:3px}
+.fsteps li.on{color:var(--ink);font-weight:600}
+.swipe{display:none;font-family:var(--mono);font-size:.72rem;color:var(--muted)}
+.sc-box{fill:var(--panel);stroke:var(--rule)}
+.sc-sand{fill:var(--paper);stroke:var(--agent);stroke-dasharray:6 5;stroke-width:1.4}
+.sc-host{fill:var(--trust-soft);stroke:var(--trust);stroke-width:1.4}
+.sc-lane{stroke:var(--rule)}
+.sc-lane.ro{fill:var(--ro-soft)} .sc-lane.rw{fill:var(--agent-soft)}
+.sc-t{font:600 13px var(--display);fill:var(--ink)}
+.sc-s{font:11.5px var(--mono);fill:var(--muted)}
+.sc-m{font:12px var(--mono);fill:var(--ink)}
+.sc-seam{stroke:var(--muted);stroke-dasharray:2 6;stroke-width:1.5}
+.sc-seamt{font:10.5px var(--mono);fill:var(--muted);letter-spacing:.08em}
+.tok rect{stroke-width:1.8}
+.tok text{font:600 11.5px var(--mono);fill:var(--ink)}
+.tok.req rect{fill:var(--agent-soft);stroke:var(--agent)}
+.tok.ok rect{fill:var(--trust-soft);stroke:var(--trust)}
+.tok.bad rect{fill:var(--refuse-soft);stroke:var(--refuse)}
+.tok{transition:transform .9s cubic-bezier(.45,.05,.3,1)}
+.sc-dec{font:600 13px var(--display)}
+.sc-dec.ok{fill:var(--trust)} .sc-dec.bad{fill:var(--refuse)} .sc-dec.n{fill:var(--muted)}
+.sc-say{font:600 12px var(--mono);fill:var(--agent)}
+.hot{stroke:var(--trust)!important;stroke-width:2.4!important}
+.hotbad{stroke:var(--refuse)!important;stroke-width:2.4!important}
+@media (prefers-reduced-motion: reduce){.tok{transition:none}}
+
+@media (max-height: 760px) and (min-width: 821px){
+  body{font-size:15.5px}
+  h2{font-size:1.6rem} .hero h1{font-size:3rem} .lede{font-size:1rem}
+  .card{padding:11px 14px} .practice{padding:11px 14px} .note{padding:10px 14px}
+  .inner{gap:10px} .screen{padding:12px 24px}
+  .cmd pre{padding:10px 14px;font-size:12.5px}
+  .scenebox svg{max-height:calc(100vh - 336px)}
+}
+@media (max-width: 820px){
+  body{font-size:16px}
+  .top{padding-inline:16px} .screen{padding:18px 16px;align-items:flex-start} .controls{padding-inline:16px}
+  .chapters .lbl{display:none}
+  .grid3,.grid2,.practices,.steps2{grid-template-columns:minmax(0,1fr)}
+  .move{grid-template-columns:minmax(0,1fr)} .move .arrow{justify-self:center;transform:rotate(90deg)}
+  .hint{display:none}
+  .swipe{display:block}
+  .controls button.next{min-width:0}
+}
+
+/* ---------- additions for the OpenShell screens ---------- */
+.status{font-family:var(--mono);font-size:.78rem;color:var(--muted);max-width:74ch}
+.status b{color:var(--trust);font-weight:600}
+.tag.v{background:var(--trust-soft);color:var(--trust)} .tag.d{background:var(--ro-soft);color:var(--ro)}
+td .tag{display:inline-block;margin:2px 0 0}
+.res{font-family:var(--mono);font-size:.74rem;font-weight:600;letter-spacing:.04em;white-space:nowrap}
+.res.p{color:var(--trust)} .res.u{color:var(--agent)} .res.f{color:var(--refuse)}
+.card ul,.practice ul{margin:0;padding-left:1.1em;font-size:.93rem;color:var(--muted);display:grid;gap:3px}
+.card.no{border-color:var(--refuse)} .card.yes{border-color:var(--trust)}
+.refuses{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px;margin:0;padding:0;list-style:none;font-size:.93rem}
+.refuses li{background:var(--panel);border:1px solid var(--rule);border-left:3px solid var(--refuse);border-radius:0 7px 7px 0;padding:8px 12px;color:var(--muted)}
+.refuses li b{color:var(--ink);font-family:var(--display)}
+.out-line{font-family:var(--mono);font-size:.82rem;background:var(--trust-soft);color:var(--trust);border-radius:6px;padding:6px 10px;justify-self:start}
+.sc-line{font:11.5px var(--mono);fill:var(--ink)}
+.sc-line.bad{fill:var(--refuse);font-weight:600}
+@media (max-width: 820px){.refuses{grid-template-columns:minmax(0,1fr)}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="top-row"><span class="brand">AMAP on OpenShell</span><span class="where" id="where" aria-live="polite"></span></div>
+    <nav class="chapters" id="chapters" aria-label="Chapters"></nav>
+  </header>
+
+  <main class="stage" id="stage">
+
+    <section class="screen hero" data-id="start" data-ch="0">
+      <div class="inner">
+        <p class="eyebrow">Agent Mailbox Access Protocol · on OpenShell</p>
+        <h1><span class="ask">An agent can ask.</span> <span class="act">Only the runtime can act.</span></h1>
+        <p class="lede">AMAP is a wire contract that lets sandboxed AI agents take part in message-based workflows through a trusted runtime that does not trust them. This walkthrough runs it on OpenShell. Press <strong>Next</strong> to walk through the ideas, watch each flow move through the real pieces, see how OpenShell supplies what AMAP needs, and then run it yourself.</p>
+        <p class="invariant"><b>The invariant</b>The runtime's authority does not depend on the agent or its connector behaving correctly. A request file cannot, on its own, grant permission to send, change the sending identity, or bypass policy.</p>
+        <p class="status"><b>Status:</b> verified live on one host, under the scope this walkthrough describes. <a href="#proven">What the live runs proved</a>.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="risks" data-ch="1">
+      <div class="inner">
+        <p class="eyebrow">The problem</p>
+        <h2>An agent is an untrusted process</h2>
+        <p class="lede">It can be prompt-injected, buggy or compromised. Connecting it to a workflow does not make its decisions trustworthy, and message access brings three risks.</p>
+        <div class="grid3">
+          <article class="card"><h3>Inbound</h3><p>A message can carry untrusted content and injection attempts straight into the agent's reasoning.</p></article>
+          <article class="card"><h3>Outbound</h3><p>A message can disclose information, or misuse an identity the agent should not control.</p></article>
+          <article class="card"><h3>Credentials</h3><p>Anything the agent can read, it can leak. Credentials in its reach are credentials at risk.</p></article>
+        </div>
+        <p class="body">What matters is not whether the agent can write a message. It is whether it can authorise one, choose the identity it goes out under, or step around policy.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="move" data-ch="1">
+      <div class="inner">
+        <p class="eyebrow">The problem</p>
+        <h2>AMAP's one move: a request is never permission</h2>
+        <div class="move">
+          <div class="step a"><span class="tag u">agent</span><h3>Reads</h3><p>what was delivered to it, from a place it cannot write.</p></div>
+          <span class="arrow" aria-hidden="true">→</span>
+          <div class="step a"><span class="tag u">agent</span><h3>Writes an inert request</h3><p>a file saying what it would like to happen. Nothing more.</p></div>
+          <span class="arrow" aria-hidden="true">→</span>
+          <div class="step r"><span class="tag t">runtime</span><h3>Decides</h3><p>whether anything happens, to whom, and under which identity.</p></div>
+        </div>
+        <p class="note">AMAP was designed for email workflows, where the runtime holds the mail credentials. This walkthrough uses <strong>amap-router-local</strong>, a reference runtime that carries no mail at all: no mail provider, no mail credentials, no network. It moves the same artifacts between agents on one machine, so what is left is exactly what the protocol asks of a runtime.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="isolation" data-ch="2">
+      <div class="inner">
+        <p class="eyebrow">Isolation first</p>
+        <h2>AMAP assumes the agent is already contained</h2>
+        <p class="lede">The protocol defines who may do what across a boundary. It does not create the boundary. Running each agent in isolation is the operational baseline that gives the protocol's guarantees meaning, and it is good practice even when nothing is malicious.</p>
+        <div class="practices">
+          <div class="practice"><h3>One contained space per agent</h3><span class="why">limits the blast radius</span><p>A compromised or confused agent damages its own workspace, not its neighbours' or the host's.</p></div>
+          <div class="practice"><h3>No credentials in the sandbox</h3><span class="why">nothing to leak</span><p>The runtime holds the sending identity, and the connector holds no credential. On OpenShell the sandbox gets placeholder credentials, and the agent never holds the real model key.</p></div>
+          <div class="practice"><h3>Read-only by mount, not by permission bits</h3><span class="why">the agent owns its files</span><p>It runs as the operator's own uid, so <code>chmod</code> would succeed. A read-only mount makes the kernel refuse the write: <code>EROFS</code>.</p></div>
+          <div class="practice"><h3>Identity given from outside</h3><span class="why">an agent must not name itself</span><p>The runtime binds each sender to its own outbox, named by the host.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen" data-id="isolation-2" data-ch="2">
+      <div class="inner">
+        <p class="eyebrow">Isolation first</p>
+        <h2>…and run it like infrastructure</h2>
+        <div class="practices">
+          <div class="practice"><h3>Supervised, and recoverable</h3><span class="why">damage does not accumulate</span><p>The delivery process restarts if it dies. A damaged member can be deprovisioned and created again, and a recreated name is a new member with a fresh first sight.</p></div>
+          <div class="practice"><h3>Membership is the operator's decision</h3><span class="why">joining is a security act</span><p>Which agents take part is a rule the operator writes and the host evaluates. Nothing inside a sandbox can add itself.</p></div>
+          <div class="practice"><h3>Observable, in three outcomes</h3><span class="why">"could not tell" is not "fine"</span><p>Every check ends in pass, fail or unknown, and unknown is reported as a problem.</p></div>
+        </div>
+        <p class="note">If your environment cannot provide one of these, the matching guarantee does not hold. It is not merely weaker. This walkthrough uses <strong>OpenShell</strong> for isolation. Its sibling, amap-deploy-sandy, does the same with sandy, and the <a href="#why">Why OpenShell</a> chapter shows how OpenShell supplies each property instead.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="pieces" data-ch="3">
+      <div class="inner">
+        <p class="eyebrow">The pieces</p>
+        <h2>Five parts, one boundary: they meet only at the contract, and only one side is trusted</h2>
+        <div class="grid3">
+          <article class="card"><header><h3>The protocol</h3><span class="tag n">contract</span></header><span class="repo">amap-spec</span><p>The directory layout, message and verdict shapes as JSON Schema, and golden fixtures. Each side proves conformance against the fixtures, without the other.</p></article>
+          <article class="card"><header><h3>The runtime</h3><span class="tag t">trusted</span></header><span class="repo">amap-router-local</span><p>Holds the graph of who may reach whom, binds replies, quarantines on first sight, writes the roster. Runs in its own container on the host with no network. Used unmodified.</p></article>
+          <article class="card"><header><h3>The connector</h3><span class="tag u">untrusted</span></header><span class="repo">amap-connector-claude</span><p>MCP tools to read (<code>inbox</code>, <code>delegation</code>) and to request (<code>inbox-submit</code>), plus <code>inbox-delivery</code>, which injects deliveries into the session. No credentials, no allowlist. Used unmodified.</p></article>
+          <article class="card"><header><h3>The isolation environment</h3><span class="tag n">sandbox</span></header><span class="repo">OpenShell</span><p>A sandbox per agent, with kernel-level filesystem and process confinement, a default-deny network and placeholder credentials. It supervises one main process, and its name is the agent's identity.</p></article>
+          <article class="card"><header><h3>The deployment</h3><span class="tag n">operator's tool</span></header><span class="repo">amap-deploy-openshell</span><p>Turns one fleet policy into each sandbox's lanes, OpenShell policy and create command, and the router's config. It ships the mounts interceptor, then verifies that what runs is what was declared.</p></article>
+        </div>
+        <p class="body">OpenShell contains the agent; AMAP governs what it says and to whom. Nothing OpenShell-specific enters amap-spec, the router or the connector.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="seam" data-ch="4">
+      <div class="inner">
+        <p class="eyebrow">The seam</p>
+        <h2>The boundary is a directory tree</h2>
+        <p class="lede">Runtime and connector never call each other. They share directories under <code>$AMAP_OPENSHELL_HOME</code> on the host, and the design rests on which side can write which one. Everything the agent reads, it cannot forge; everything it writes is only a request.</p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Path on the host</th><th>Written by</th><th>In the sandbox</th><th>Holds</th></tr></thead>
+            <tbody>
+              <tr><td class="path">instances/&lt;name&gt;/</td><td>deployment</td><td></td><td>One agent's lanes, created by <code>provision</code>. The name is the OpenShell sandbox name and the agent's identity.</td></tr>
+              <tr><td class="path d1">inbox/</td><td>runtime</td><td><span class="mode ro">read-only</span></td><td>Mail delivered to this agent.</td></tr>
+              <tr><td class="path d1">peer/</td><td>runtime</td><td><span class="mode ro">read-only</span></td><td>Tasks from agents allowed to send them.</td></tr>
+              <tr><td class="path d1">outbox/</td><td>agent</td><td><span class="mode rw">writable</span></td><td>Inert requests; the runtime's verdicts come back in <code>results/</code>.</td></tr>
+              <tr><td class="path">payload/</td><td>deployment</td><td><span class="mode ro">read-only</span></td><td>The connector's binaries, the main-process wrapper, the session lister, the MCP config and the agent's policy text, at <code>/opt/amap/payload</code>.</td></tr>
+              <tr><td class="path">roster/</td><td>runtime</td><td><span class="mode ro">read-only</span></td><td>Who exists in the fleet, at <code>/opt/amap/roster</code>. Never who may task whom.</td></tr>
+              <tr><td class="path">router-state/</td><td>runtime</td><td><span class="mode host">host only</span></td><td>Ledgers, held requests and first-sight markers. Not a mount in any sandbox.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="small">"Read-only" here is two layers: a <code>:ro</code> bind mount, and a Landlock <code>read_only</code> entry in the sandbox's OpenShell policy. Only the outbox is <code>read_write</code>.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="lanes" data-ch="5">
+      <div class="inner">
+        <p class="eyebrow">Two lanes</p>
+        <h2>Mail and delegation carry different trust</h2>
+        <p class="lede">They are declared separately, and a pair of agents may sit on only one of them, so a sender can never pick which trust it is judged under.</p>
+        <div class="grid2">
+          <article class="card lane">
+            <h3>Mail</h3>
+            <svg viewBox="0 0 280 80" role="img" aria-label="Mail is mutual: a and b each list the other">
+              <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--ink)"/></marker><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--trust)"/></marker></defs>
+              <circle cx="50" cy="40" r="20" fill="var(--agent-soft)" stroke="var(--agent)"/><text x="50" y="45" text-anchor="middle" class="sc-t">a</text>
+              <circle cx="230" cy="40" r="20" fill="var(--agent-soft)" stroke="var(--agent)"/><text x="230" y="45" text-anchor="middle" class="sc-t">b</text>
+              <path d="M76 33 H204" stroke="var(--ink)" stroke-width="1.6" fill="none" marker-end="url(#ah)"/>
+              <path d="M204 47 H76" stroke="var(--ink)" stroke-width="1.6" fill="none" marker-end="url(#ah)"/>
+            </svg>
+            <ul><li><strong>Mutual:</strong> both sides must list each other.</li><li>Delivery is a content-free doorbell; the agent reads with the <code>inbox</code> tool.</li><li>Content is untrusted: reported, not obeyed.</li></ul>
+          </article>
+          <article class="card lane">
+            <h3>Delegation</h3>
+            <svg viewBox="0 0 280 80" role="img" aria-label="Delegation is directed: a may task b, which does not let b task a">
+              <circle cx="50" cy="40" r="20" fill="var(--agent-soft)" stroke="var(--agent)"/><text x="50" y="45" text-anchor="middle" class="sc-t">a</text>
+              <circle cx="230" cy="40" r="20" fill="var(--agent-soft)" stroke="var(--agent)"/><text x="230" y="45" text-anchor="middle" class="sc-t">b</text>
+              <path d="M76 40 H204" stroke="var(--trust)" stroke-width="2" fill="none" marker-end="url(#ah2)"/>
+              <text x="140" y="72" text-anchor="middle" class="sc-s">a may task b</text>
+            </svg>
+            <ul><li><strong>Directed:</strong> a may task b says nothing about b tasking a.</li><li>The request itself is injected into the session.</li><li>The runtime authorised it, so it is meant to be acted on, within what the agent may already do.</li></ul>
+          </article>
+        </div>
+        <p class="body">On both lanes a <strong>reply</strong> goes back to the sender and nowhere else, even against the direction of a delegation edge. The example fleet uses only delegation: alpha may task beta, and beta may not task alpha.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="flow-deleg" data-ch="6" data-flow="deleg"><div class="inner flowscreen"></div></section>
+    <section class="screen" data-id="flow-reply" data-ch="6" data-flow="reply"><div class="inner flowscreen"></div></section>
+    <section class="screen" data-id="flow-held" data-ch="6" data-flow="held"><div class="inner flowscreen"></div></section>
+    <section class="screen" data-id="flow-first" data-ch="6" data-flow="first"><div class="inner flowscreen"></div></section>
+    <section class="screen" data-id="flow-mail" data-ch="6" data-flow="mail"><div class="inner flowscreen"></div></section>
+
+    <section class="screen" data-id="verify" data-ch="7">
+      <div class="inner">
+        <p class="eyebrow">Knowing it holds</p>
+        <h2>Three outcomes, never two</h2>
+        <p class="lede">The deployment's <code>verify</code> has six sections: the install, the router config, the gateway, the members, the router's container and the router's health. For each member it checks the sandbox against its recorded ID, the effective policy, the container's mount table, a write attempted from inside, and that <code>inbox-delivery</code> is running. Every check ends one of three ways.</p>
+        <div class="grid3">
+          <div class="card outcome p"><b>PASS</b><p>Established from the thing itself: the container's mount table, not the host directory; a write attempted inside the sandbox; the router's own status, not a guess.</p></div>
+          <div class="card outcome f"><b>FAIL</b><p>Known to be broken. A stopped router is a FAIL, not an UNKNOWN: its evidence is stale, not missing.</p></div>
+          <div class="card outcome u"><b>UNKNOWN</b><p>Could not be answered, as with an unreadable file. Reported as a problem: <code>verify</code> exits 1, and it is never rounded to a pass.</p></div>
+        </div>
+        <p class="body">The fleet roster keeps the same honesty. It lists who exists so agents can find addresses, and never who may task whom. The verdict in <code>outbox/results</code> is the only report of what happened.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="why" data-ch="8">
+      <div class="inner">
+        <p class="eyebrow">Why OpenShell</p>
+        <h2>Five properties AMAP needs from a host, and how OpenShell provides each</h2>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>AMAP needs</th><th>OpenShell, with this deployment, provides it as</th><th>Shown live</th></tr></thead>
+            <tbody>
+              <tr><td class="strong">A space per agent</td><td>One sandbox per agent. <code>provision</code> creates each agent's lanes on the host and passes them to that sandbox alone as bind mounts. OpenShell does not stop two sandboxes sharing a host path, so exclusivity is the tooling's job: <code>verify</code> checks it, and the interceptor refuses a wrong mount at creation. The router's writes appear inside the running sandbox with no delay.</td><td><span class="tag v">L1 · Unknown 1</span></td></tr>
+              <tr><td class="strong">An identity it cannot forge</td><td>The sandbox <strong>name</strong>, read on the host and mapped to <code>&lt;name&gt;@&lt;fleet_domain&gt;</code>. The agent cannot rename its sandbox. A deleted and recreated name gets a new ID, so membership is the pair (name, OpenShell ID), and <code>verify</code> fails when the ID changes.</td><td><span class="tag d">from OpenShell's docs and code</span></td></tr>
+              <tr><td class="strong">Read-only mounts</td><td>Two independent layers. A <code>:ro</code> Docker bind, in a container with every capability dropped and <code>no-new-privileges</code>. Under it, <strong>Landlock</strong>: the policy lists the inbox, peer, roster and payload as <code>read_only</code>, only the outbox as <code>read_write</code>, every other path inaccessible, locked at creation. A write fails with <code>EROFS</code>.</td><td><span class="tag v">L1 · Pass criterion 3, Unknown 2</span></td></tr>
+              <tr><td class="strong">A supervised process</td><td>OpenShell supervises one main process. Here it is the deployment's wrapper on the read-only payload: it runs <code>inbox-delivery</code> in its own restart loop, then <code>claude</code>. The daemon injects over Claude Code's own Unix socket.</td><td><span class="tag v">L1 · Pass criterion 2, Unknown 4</span></td></tr>
+              <tr><td class="strong">Operator-owned membership</td><td>The tooling decides, from the fleet policy, which sandboxes get lanes. A sandbox without lanes is simply not in the fleet. <code>membership.json</code> records (workspace, name, ID), and <code>provision</code> refuses a name whose sandbox exists under a different ID.</td><td><span class="tag d">the tooling's own rule</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="grid3">
+          <article class="card"><h3>Egress only to the provider</h3><p>The default policy denies all egress. The provider profile adds one endpoint, the model's, for the image's real <code>node</code> and <code>claude</code> binaries. Every denial is logged. <span class="tag v">L1 · Pass criterion 4</span></p></article>
+          <article class="card"><h3>One shared uid</h3><p>The operator's own uid:gid owns every lane and runs the router and every sandbox (D7). Agents are separated by container and per-sandbox mounts, not by uid, and the router writes <code>0600</code>. <span class="tag v">L1 · Unknown 7</span></p></article>
+          <article class="card"><h3>The price: bind mounts</h3><p>Host bind mounts need the gateway's admission checks off, an "unsafe operator override". Any caller that may create a sandbox can then mount any host path. That sets the scope, next.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen" data-id="scope" data-ch="8">
+      <div class="inner">
+        <p class="eyebrow">Why OpenShell · the scope</p>
+        <h2>One host, one operator</h2>
+        <p class="lede">The router, the payload, every lane and every sandbox are on one OpenShell host, and every account and process on it acts for one operator (D17). The gateway is dedicated to this work, listens on loopback only, has no OIDC, and runs no other sandboxes. This is the designed scope, not a temporary risk.</p>
+        <div class="grid2">
+          <article class="card yes">
+            <h3>What it protects</h3>
+            <ul>
+              <li><strong>Agents from the host.</strong> Each agent's inbox and peer lanes are read-only to it, in both the mount and Landlock. Its only egress is the provider's endpoint. It has no route to the gateway.</li>
+              <li><strong>Agents from each other.</strong> Each member's lanes are its own. Delegation is directed by the task graph. The router binds each reply to the sender it answers.</li>
+            </ul>
+          </article>
+          <article class="card no">
+            <h3>What it does not protect</h3>
+            <ul>
+              <li><strong>The host from its own operator.</strong> Anything that can call the gateway on loopback is trusted, because it is the operator.</li>
+              <li>So the mounts interceptor guards against the operator's mistakes, not against another person.</li>
+            </ul>
+          </article>
+        </div>
+        <p class="note">Several operators on one host, or a fleet of hosts, need work first: gateway authentication and per-operator workspaces, an interceptor that becomes a real boundary, a uid per operator, and checks that stop assuming the host is ours. Across hosts there is no delegation: the spool is local directories, so each host is an independent fleet. None of it is planned. <a href="https://github.com/proofpoint/amap-deploy-openshell/blob/main/DESIGN.md#9-widening-the-scope">DESIGN.md "Widening the scope"</a> lists it.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="interceptor" data-ch="8">
+      <div class="inner">
+        <p class="eyebrow">Why OpenShell · the mounts interceptor</p>
+        <h2>A wrong mount is refused at creation, not found afterwards</h2>
+        <p class="lede">With admission off, a hand-typed <code>sandbox create</code>, or a script, that mounts the wrong path would silently break a member's exclusive lanes, and <code>verify</code> would catch it only afterwards. The interceptor is this deployment's code, beside the gateway: one <code>validate</code> binding on <code>CreateSandbox</code>, registered <code>fail_closed</code>. It restores, at creation, that a member's lanes are its own and that only its own outbox is writable.</p>
+        <ul class="refuses">
+          <li><b>A bind source that is not exactly one of that name's own</b>: its <code>instances/&lt;name&gt;/</code> lanes, the payload or the roster. Not a parent, not a subtree.</li>
+          <li><b>A read-only flag that differs</b> from what <code>provision</code> renders. Only the member's own outbox may be read-write.</li>
+          <li><b>A name outside the fleet</b>, or a workspace that is not the fleet's.</li>
+          <li><b>A source with a symlink</b> in it, or one that is not a normalised absolute path.</li>
+          <li><b>Anything it cannot check</b>: a templated create, an unknown field, a driver other than Docker, a mount type other than <code>bind</code>.</li>
+          <li><b>Itself failing</b>: a timeout, transport error or invalid result is a refusal. The gateway does not start until it listens.</li>
+        </ul>
+        <p class="note">Under the scope it is defence in depth: protection against the operator's own mistakes and misbehaving local tooling (D17), not a boundary between people. A create without mounts cannot touch the spool, so it is outside the interceptor's job. <a href="https://github.com/proofpoint/amap-deploy-openshell/blob/main/docs/INTERCEPTOR.md">docs/INTERCEPTOR.md</a> has the full rule.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="flow-icp-deny" data-ch="8" data-flow="icpdeny"><div class="inner flowscreen"></div></section>
+    <section class="screen" data-id="flow-icp-allow" data-ch="8" data-flow="icpallow"><div class="inner flowscreen"></div></section>
+
+    <section class="screen" data-id="host" data-ch="9">
+      <div class="inner">
+        <p class="eyebrow">Run it yourself · 1 of 4</p>
+        <h2>A host, then the pieces</h2>
+        <div class="req"><span>Linux 6.2+ (Landlock ABI 3)</span><span>Docker</span><span>OpenShell v0.1.2+</span><span>Python 3.9+</span><span>a Console API key</span><span>the Claude Code version you measured</span></div>
+        <div class="paths">
+          <div class="path">
+            <h3><span class="n">1</span>The host</h3>
+            <p class="small">The example in <code>examples/vms/proxmox</code> makes a fresh Ubuntu 24.04 VM and provisions it: it checks the kernel for Landlock, installs Docker and OpenShell (pinned to 0.1.2), writes the gateway config with the scope's posture, and checks it. Both scripts are dry runs by default. In the VM, as the account that will own OpenShell:</p>
+            <div class="cmd"><div class="label"><span>inside the VM</span><button type="button" class="copy">Copy</button></div>
+<pre>./provision-guest.sh            <span class="c"># checks, and the plan</span>
+./provision-guest.sh --apply</pre></div>
+            <p class="small">On another host, meet the requirements and merge the gateway fragment that <code>gateway-config</code> prints. The gateway must listen on loopback only, with no other sandbox on it.</p>
+          </div>
+          <div class="path">
+            <h3><span class="n">2</span>The pieces</h3>
+            <p class="small">Clone this repository. <code>siblings</code> puts amap-router-local, amap-connector-claude and amap-deploy-sandy beside it at the commits in <code>siblings.json</code>, and clones or fast-forwards amap-spec. amap-deploy-sandy is not optional: the fleet-policy core is imported from it.</p>
+            <div class="cmd"><div class="label"><span>the code</span><button type="button" class="copy">Copy</button></div>
+<pre>git clone https://github.com/proofpoint/amap-deploy-openshell
+cd amap-deploy-openshell
+python3 amap-openshell.py siblings          <span class="c"># the plan</span>
+python3 amap-openshell.py siblings --apply</pre></div>
+            <div class="cmd"><div class="label"><span>every terminal, until the home is recorded</span><button type="button" class="copy">Copy</button></div>
+<pre>export AMAP_OPENSHELL_HOME="&lt;absolute path of a new directory&gt;"
+export CLAUDE_CODE_VERSION="&lt;the Claude Code version you measured&gt;"</pre></div>
+          </div>
+        </div>
+        <p class="small">Every command runs from the repository's root. <code>$AMAP_OPENSHELL_HOME</code> must not be inside, or contain, this repository or a sibling checkout.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="interceptor-run" data-ch="9">
+      <div class="inner">
+        <p class="eyebrow">Run it yourself · 2 of 4</p>
+        <h2>Deploy the mounts interceptor</h2>
+        <div class="steps2">
+          <div class="cmd"><div class="label"><span>from the clone, a dry run first</span><button type="button" class="copy">Copy</button></div>
+<pre>examples/vms/proxmox/provision-guest.sh --home "$AMAP_OPENSHELL_HOME"
+examples/vms/proxmox/provision-guest.sh --home "$AMAP_OPENSHELL_HOME" --apply
+
+<span class="c"># read-only: the fragment, and whether gateway.toml has it</span>
+python3 amap-openshell.py gateway-config</pre></div>
+          <div class="fileview"><div class="label">what it registers in gateway.toml</div>
+<pre>[[openshell.gateway.interceptors]]
+name           = "amap-openshell-mounts"
+grpc_endpoint  = "unix://$AMAP_OPENSHELL_HOME/run/interceptor.sock"
+allow_insecure_transport = true
+failure_policy = "fail_closed"
+binding_policy = "exact"
+timeout        = "2s"
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/CreateSandbox"
+phases = ["validate"]</pre></div>
+        </div>
+        <dl class="fields">
+          <div><dt>--home</dt><dd>Builds the interceptor's hash-locked virtualenv, installs a systemd user unit ordered before the gateway, merges the fragment into <code>gateway.toml</code> and restarts the gateway. It also records the home, so later commands find it without the export (D25).</dd></div>
+          <div><dt>fail_closed, exact</dt><dd>A timeout, transport error or invalid result is a refusal. The gateway does not start if the configured and declared bindings differ.</dd></div>
+          <div><dt>allow_insecure_transport</dt><dd>The gateway signs its calls to extensions by default, and this interceptor does not verify tokens. It opts out (D24), and the gateway logs a warning at every start. The boundary is the socket: <code>0600</code>, in a <code>0700</code> directory outside every mount source.</dd></div>
+        </dl>
+        <p class="small">On a host that is not the example VM, run the dry run and do what it prints.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="bring-up" data-ch="9">
+      <div class="inner">
+        <p class="eyebrow">Run it yourself · 3 of 4</p>
+        <h2>Bring it up</h2>
+        <div class="steps2">
+          <div class="cmd"><div class="label"><span>a dry run, then the real one</span><button type="button" class="copy">Copy</button></div>
+<pre><span class="c"># the key: exported in this terminal, never printed</span>
+test -n "$ANTHROPIC_API_KEY" || echo "set ANTHROPIC_API_KEY first"
+
+python3 amap-openshell.py bring-up --claude-code-version "$CLAUDE_CODE_VERSION"
+python3 amap-openshell.py bring-up --claude-code-version "$CLAUDE_CODE_VERSION" --apply
+<span class="c"># the last line, only when verify exits 0:</span>
+<span class="c"># AMAP is up</span></pre></div>
+          <div class="grid" style="display:grid;gap:10px">
+            <p class="small">In order, stopping at the first that fails, and skipping whatever is already done:</p>
+            <ol class="small" style="margin:0;padding-left:1.3em;display:grid;gap:3px">
+              <li>build the sandbox image, with the one uid:gid</li>
+              <li>check the gateway config</li>
+              <li><code>install</code>: the payload, the fleet policy, the roster</li>
+              <li>import the provider profile</li>
+              <li><code>provision</code> alpha and beta</li>
+              <li>render the router's config and start the router</li>
+              <li><code>verify</code></li>
+            </ol>
+            <p class="out-line">AMAP is up</p>
+          </div>
+        </div>
+        <p class="small">It never deletes a sandbox, a container, an image or a profile, never edits <code>gateway.toml</code> and never restarts the gateway. Its preflight refuses when the interceptor is not accepting on its socket. The key reaches <code>sandbox create</code> and nothing else. Any other ending names the stage that stopped it, with a non-zero exit. Starting the router is the approval: its first poll of each member is first sight, and nothing staged before it is ever delivered. To see each piece, follow the runbook's steps 3 to 9 one at a time instead.</p>
+        <div class="cmd"><div class="label"><span>check it any time</span><button type="button" class="copy">Copy</button></div>
+<pre>python3 amap-openshell.py list     <span class="c"># each line: member</span>
+python3 amap-openshell.py verify   <span class="c"># exit 0 before going on</span></pre></div>
+      </div>
+    </section>
+
+    <section class="screen" data-id="try" data-ch="9">
+      <div class="inner">
+        <p class="eyebrow">Run it yourself · 4 of 4</p>
+        <h2>Send your first delegation</h2>
+        <div class="steps2">
+          <div class="cmd"><div class="label"><span>two terminals</span><button type="button" class="copy">Copy</button></div>
+<pre>openshell --workspace default sandbox connect alpha   <span class="c"># terminal 1</span>
+openshell --workspace default sandbox connect beta    <span class="c"># terminal 2: watch it arrive</span></pre></div>
+          <div class="grid" style="display:grid;gap:10px">
+            <p class="small">Ask alpha, in plain words:</p>
+            <p class="prompt">Read <code>/opt/amap/roster/roster.json</code> and find beta's address. Then ask beta, through <code>inbox-submit</code>, to list the files in its workspace and report back.</p>
+            <p class="small">The address has the form <code>beta@openshell.&lt;host&gt;.internal</code>. The reply must arrive in each session as a turn, not be found by polling.</p>
+          </div>
+        </div>
+        <p class="body">You have just watched the first flow for real. The runbook then breaks each guarantee on purpose: a write to a lane fails with <code>Read-only file system</code>, both layers show in the policy and the mounts, beta's new task for alpha is <code>queued_for_human</code>, a call to a mail host is <code>DENIED</code>, an edited <code>router.json</code> is a FAIL, and so is a stopped router.</p>
+        <div class="links">
+          <a class="primary" href="https://github.com/proofpoint/amap-deploy-openshell/blob/main/docs/TUTORIAL.md">Open the full runbook</a>
+          <a href="https://github.com/proofpoint/amap-deploy-openshell/blob/main/README.md">README</a>
+          <a href="https://github.com/proofpoint/amap-deploy-openshell/blob/main/DESIGN.md">DESIGN.md</a>
+          <a href="https://github.com/proofpoint/amap-deploy-openshell/blob/main/examples/vms/proxmox/README.md">The example VM</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen" data-id="proven" data-ch="10">
+      <div class="inner">
+        <p class="eyebrow">Proven live</p>
+        <h2>What the live runs established</h2>
+        <p class="lede">Each run was on a fresh host, with the example fleet: alpha may task beta. Every outcome is PASS, FAIL or UNKNOWN, as recorded in <a href="https://github.com/proofpoint/amap-deploy-openshell/blob/main/docs/POC-REPORT.md">docs/POC-REPORT.md</a>.</p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Run</th><th>What it established</th><th>Outcome</th></tr></thead>
+            <tbody>
+              <tr><td class="strong">L1<br><span class="repo">proof of concept</span></td><td>alpha delegated to beta, beta's daemon reported <code>delivered</code>, and beta's reply, real work, reached alpha. A write to the inbox lane failed at both layers with <code>EROFS</code>. A call to a mail host was denied and logged. beta tasking alpha was held at the router. Host writes appear inside a running sandbox; a lane mounted but missing from the policy is unreadable; the shared uid holds end to end.</td><td><span class="res p">PASS</span><br><span class="small">Pass criteria 2-5, Unknowns 1-7</span></td></tr>
+              <tr><td class="strong">L1<br><span class="repo">Pass criterion 1</span></td><td>Every live document of five classes passed amap-spec's validator. Three classes had no live document, so the runner said UNKNOWN. The report accounts for each by hand: two are not emitted by this deployment, and <code>deliver-notice</code> belongs to the mail lane, which this fleet does not carry.</td><td><span class="res u">UNKNOWN</span> from the runner,<br><span class="res p">PASS</span> as accounted</td></tr>
+              <tr><td class="strong">L2<br><span class="repo">the tooling</span></td><td><code>bring-up --apply</code> ended <code>AMAP is up</code> on a rebuilt host, after two stops that each named their stage; a rerun skipped every stage before <code>verify</code>. Given the runbook's prompt, alpha chose to delegate, and the task and the reply each arrived as a turn. Every break-it experiment passed, and one prediction was corrected: a stopped router is FAIL, not UNKNOWN.</td><td><span class="res p">PASS</span></td></tr>
+              <tr><td class="strong">L2<br><span class="repo">re-check</span></td><td><code>l1-run --only 8</code> against the fleet the verbs provisioned, once <code>--only 7</code> had planted a delegation.</td><td><span class="res p">PASS</span> for Pass criteria 2-5 and Unknowns 1-7;<br>Pass criterion 1 <span class="res u">UNKNOWN</span>, as in L1</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen" data-id="proven-rerun" data-ch="10">
+      <div class="inner">
+        <p class="eyebrow">Proven live · the interceptor on</p>
+        <h2>The L2 rerun, with the mounts interceptor on</h2>
+        <p class="lede">A VM built fresh, on the full stack: the interceptor, the per-host fleet domain and the home record. Four problems were found, each stop named its cause, and each fix landed with a test the old code fails. The final recreate ended <code>AMAP is up</code>, and <code>verify</code>, run from a fresh shell with no export, exited 0.</p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Check</th><th>Outcome</th></tr></thead>
+            <tbody>
+              <tr><td>The gateway accepts the interceptor block, and both members provision through it (<code>evaluate allow</code>, once each)</td><td><span class="res p">PASS</span></td></tr>
+              <tr><td>A create mounting another member's outbox is refused by the interceptor, with the right reasons</td><td><span class="res p">PASS</span></td></tr>
+              <tr><td>Latency well inside the 2 s timeout; the gateway keeps working after the interceptor restarts</td><td><span class="res p">PASS</span></td></tr>
+              <tr><td>Addresses use the derived domain, <code>alpha@openshell.&lt;host&gt;.internal</code></td><td><span class="res p">PASS</span></td></tr>
+              <tr><td>Step 10, both directions: alpha found beta in the roster, the task and the reply arrived as turns</td><td><span class="res p">PASS</span></td></tr>
+              <tr><td><code>l1-run</code>: Pass criteria 2-5, Unknowns 1, 2, 4, 5, 6, 7</td><td><span class="res p">PASS</span></td></tr>
+              <tr><td><code>l1-run</code>: Pass criterion 1, for L1's three classes</td><td><span class="res u">UNKNOWN</span></td></tr>
+              <tr><td><code>l1-run</code>: Unknown 3. Its probe is a non-member sandbox that mounts alpha's lanes, and the interceptor refused it before it existed, as it should. The property is Landlock's, settled PASS in L1 and L2 with the interceptor off. For this run it stays UNKNOWN, never a pass.</td><td><span class="res u">UNKNOWN</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note"><strong>Not established yet.</strong> The mail lane: this fleet carries none. Whether an agent's own <code>settings.json</code> changes its receiver setting. The exact wire spelling of field names the interceptor reads (it reads both). <code>provision-guest.sh</code> replacing its own interceptor block when the fragment changes. Podman, Kubernetes, and anything beyond one host and one operator.</p>
+        <div class="links">
+          <a class="primary" href="https://github.com/proofpoint/amap-deploy-openshell/blob/main/docs/POC-REPORT.md">Read the POC report</a>
+          <a href="https://github.com/proofpoint/amap-spec">amap-spec</a>
+          <a href="https://github.com/proofpoint/amap-router-local">amap-router-local</a>
+          <a href="https://github.com/proofpoint/amap-connector-claude">amap-connector-claude</a>
+          <a href="https://github.com/proofpoint/amap-deploy-sandy">amap-deploy-sandy</a>
+          <a href="https://github.com/NVIDIA/OpenShell">OpenShell</a>
+        </div>
+        <p class="repo">amap-deploy-openshell · Apache License 2.0 · AMAP is a draft contract; the spec repository is normative.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="controls">
+    <button type="button" id="back">Back</button>
+    <span class="hint">← → or space to move</span>
+    <button type="button" class="next" id="next">Next</button>
+  </footer>
+</div>
+
+<template id="flow-tpl">
+  <div class="flowhead">
+    <div><p class="eyebrow feye"></p><h2 class="ftitle"></h2></div>
+    <span class="count"></span>
+  </div>
+  <p class="caption" aria-live="polite"></p>
+  <p class="swipe"></p>
+  <div class="scenebox"></div>
+  <details class="fsteps"><summary>All steps as text</summary><ol></ol></details>
+</template>
+
+<div hidden>
+<svg id="scene" viewBox="0 0 960 430" role="img" aria-labelledby="scene-t">
+  <title id="scene-t">Two OpenShell sandboxes, alpha and beta, with the router on the host between them. Policy: alpha may task beta; beta may not task alpha.</title>
+  <rect x="0" y="0" width="960" height="430" fill="var(--panel)"/>
+  <rect class="sc-sand" x="16" y="18" width="286" height="390" rx="12"/>
+  <text class="sc-t" x="34" y="44">sandbox · alpha</text><text class="sc-s" x="286" y="44" text-anchor="end">untrusted</text>
+  <rect class="sc-box" id="n-a-sess" x="32" y="58" width="254" height="78" rx="8"/>
+  <text class="sc-m" x="46" y="80">Claude Code session</text>
+  <text class="sc-say dyn" id="say-a" x="46" y="112"></text>
+  <rect class="sc-lane rw" id="n-a-out" x="32" y="152" width="254" height="64" rx="8"/>
+  <text class="sc-m" x="46" y="172">outbox/</text><text class="sc-s" x="272" y="172" text-anchor="end">writable</text>
+  <rect class="sc-lane ro" id="n-a-peer" x="32" y="228" width="254" height="64" rx="8"/>
+  <text class="sc-m" x="46" y="248">peer/notices</text><text class="sc-s" x="272" y="248" text-anchor="end">read-only</text>
+  <rect class="sc-lane ro" id="n-a-in" x="32" y="304" width="254" height="64" rx="8"/>
+  <text class="sc-m" x="46" y="324">inbox/notices</text><text class="sc-s" x="272" y="324" text-anchor="end">read-only</text>
+  <text class="sc-s" x="46" y="392">inbox-delivery → session</text>
+  <rect class="sc-sand" x="658" y="18" width="286" height="390" rx="12"/>
+  <text class="sc-t" x="676" y="44">sandbox · beta</text><text class="sc-s" x="928" y="44" text-anchor="end">untrusted</text>
+  <rect class="sc-box" id="n-b-sess" x="674" y="58" width="254" height="78" rx="8"/>
+  <text class="sc-m" x="688" y="80">Claude Code session</text>
+  <text class="sc-say dyn" id="say-b" x="688" y="112"></text>
+  <rect class="sc-lane rw" id="n-b-out" x="674" y="152" width="254" height="64" rx="8"/>
+  <text class="sc-m" x="688" y="172">outbox/</text><text class="sc-s" x="914" y="172" text-anchor="end">writable</text>
+  <rect class="sc-lane ro" id="n-b-peer" x="674" y="228" width="254" height="64" rx="8"/>
+  <text class="sc-m" x="688" y="248">peer/notices</text><text class="sc-s" x="914" y="248" text-anchor="end">read-only</text>
+  <rect class="sc-lane ro" id="n-b-in" x="674" y="304" width="254" height="64" rx="8"/>
+  <text class="sc-m" x="688" y="324">inbox/notices</text><text class="sc-s" x="914" y="324" text-anchor="end">read-only</text>
+  <text class="sc-s" x="688" y="392">inbox-delivery → session</text>
+  <line class="sc-seam" x1="330" y1="14" x2="330" y2="412"/><line class="sc-seam" x1="630" y1="14" x2="630" y2="412"/>
+  <text class="sc-seamt" x="336" y="410">SEAM</text><text class="sc-seamt" x="624" y="410" text-anchor="end">SEAM</text>
+  <rect class="sc-host" id="n-r" x="354" y="110" width="252" height="210" rx="12"/>
+  <text class="sc-t" x="480" y="138" text-anchor="middle">amap-router-local</text>
+  <text class="sc-s" x="480" y="156" text-anchor="middle">host · trusted · no network</text>
+  <text class="sc-s" x="480" y="178" text-anchor="middle">graph · reply binding · first sight</text>
+  <text class="sc-dec dyn" id="dec1" x="480" y="276" text-anchor="middle"></text>
+  <text class="sc-dec dyn" id="dec2" x="480" y="298" text-anchor="middle"></text>
+  <g class="toks"></g>
+</svg>
+
+<svg id="scene-icp" viewBox="0 0 960 430" role="img" aria-labelledby="scene-icp-t">
+  <title id="scene-icp-t">On the host: the operator's tooling on the left, the OpenShell gateway and the mounts interceptor in the middle, and the lane directories and the sandbox to be created on the right.</title>
+  <rect x="0" y="0" width="960" height="430" fill="var(--panel)"/>
+  <rect class="sc-host" x="16" y="18" width="286" height="390" rx="12"/>
+  <text class="sc-t" x="34" y="44">the operator's tooling</text><text class="sc-s" x="286" y="44" text-anchor="end">host</text>
+  <rect class="sc-box" id="i-op" x="32" y="58" width="254" height="78" rx="8"/>
+  <text class="sc-m" x="46" y="80">sandbox create</text>
+  <text class="sc-say dyn" id="i-say-a" x="46" y="112"></text>
+  <text class="sc-s" x="46" y="176">bind mounts in the request</text>
+  <text class="sc-line dyn" id="i-m1" x="46" y="202"></text>
+  <text class="sc-line dyn" id="i-m2" x="46" y="226"></text>
+  <text class="sc-line dyn" id="i-m3" x="46" y="250"></text>
+  <text class="sc-line dyn" id="i-m4" x="46" y="274"></text>
+  <line class="sc-seam" x1="330" y1="14" x2="330" y2="412"/><line class="sc-seam" x1="630" y1="14" x2="630" y2="412"/>
+  <rect class="sc-box" id="i-gw" x="354" y="40" width="252" height="110" rx="12"/>
+  <text class="sc-t" x="480" y="66" text-anchor="middle">OpenShell gateway</text>
+  <text class="sc-s" x="480" y="84" text-anchor="middle">CreateSandbox · admission off</text>
+  <rect class="sc-host" id="i-icp" x="354" y="180" width="252" height="160" rx="12"/>
+  <text class="sc-t" x="480" y="206" text-anchor="middle">mounts interceptor</text>
+  <text class="sc-s" x="480" y="224" text-anchor="middle">validate · fail_closed · 2 s</text>
+  <text class="sc-dec dyn" id="i-dec1" x="480" y="300" text-anchor="middle"></text>
+  <text class="sc-dec dyn" id="i-dec2" x="480" y="322" text-anchor="middle"></text>
+  <text class="sc-t" x="676" y="44">$AMAP_OPENSHELL_HOME</text><text class="sc-s" x="928" y="44" text-anchor="end">host</text>
+  <rect class="sc-lane ro" id="i-pay" x="658" y="58" width="286" height="40" rx="8"/>
+  <text class="sc-m" x="672" y="83">payload/, roster/</text><text class="sc-s" x="930" y="83" text-anchor="end">read-only</text>
+  <rect class="sc-lane ro" id="i-ain" x="658" y="106" width="286" height="40" rx="8"/>
+  <text class="sc-m" x="672" y="131">alpha/inbox, peer</text><text class="sc-s" x="930" y="131" text-anchor="end">read-only</text>
+  <rect class="sc-lane rw" id="i-aout" x="658" y="154" width="286" height="40" rx="8"/>
+  <text class="sc-m" x="672" y="179">alpha/outbox</text><text class="sc-s" x="930" y="179" text-anchor="end">alpha's own</text>
+  <rect class="sc-lane rw" id="i-bout" x="658" y="202" width="286" height="40" rx="8"/>
+  <text class="sc-m" x="672" y="227">beta/outbox</text><text class="sc-s" x="930" y="227" text-anchor="end">beta's own</text>
+  <rect class="sc-sand" id="i-sbx" x="658" y="270" width="286" height="138" rx="12"/>
+  <text class="sc-t" x="676" y="296">sandbox · alpha</text>
+  <text class="sc-say dyn" id="i-say-b" x="676" y="324"></text>
+  <g class="toks"></g>
+</svg>
+</div>
+
+<script>
+(() => {
+  const NS = "http://www.w3.org/2000/svg";
+  const CHAPTERS = ["Start", "The problem", "Isolation first", "The pieces", "The seam", "Two lanes", "Watch it work", "Knowing it holds", "Why OpenShell", "Run it yourself", "Proven live"];
+  // Each scene: its SVG, the prefix of its dynamic ids, and its token positions.
+  const SCENES = {
+    main: { el: document.getElementById("scene"), pre: "", P: {
+      aOut:[160,196], aRes:[236,196], aPeer:[160,272], aIn:[160,348],
+      bOut:[802,196], bPeer:[802,272], bIn:[802,348],
+      r:[480,222], rHold:[480,232], aStaged:[96,196]
+    }},
+    icp: { el: document.getElementById("scene-icp"), pre: "i-", P: {
+      op:[160,312], gw:[480,120], icp:[480,262], back:[160,370], sbx:[800,370]
+    }}
+  };
+  // Policy throughout the main scene: alpha may task beta; beta may not task alpha.
+  const FLOWS = {
+    deleg: { name:"A delegation", steps:[
+      ["alpha decides to ask beta for work. It calls submit(to: beta).", [["say","a","submit(to: beta)"]]],
+      ["The connector writes an inert request into alpha's outbox. That is all an agent can do.", [["tok","q","request","req","aOut"],["hot","n-a-out","ok"]]],
+      ["The router picks the request up on its next poll.", [["mv","q","r"]]],
+      ["It checks its graph: alpha may task beta. It binds the sender to alpha's outbox, not to anything alpha wrote.", [["dec",1,"alpha → beta: granted ✓","ok"],["kind","q","ok"]]],
+      ["The router places a notice in beta's read-only peer lane, and writes alpha's verdict: accepted.", [["mv","q","bPeer"],["tok","v","accepted","ok","r"],["mv","v","aRes"],["hot","n-b-peer","ok"]]],
+      ["beta's inbox-delivery injects the request into beta's live session. beta acts on it, within what it may already do.", [["say","b","← task from alpha"],["hot","n-b-sess","ok"]]]
+    ]},
+    reply: { name:"Reply binding", steps:[
+      ["beta finished alpha's task and replies with submit, naming the task in in_reply_to.", [["say","b","submit(reply)"]]],
+      ["The reply is a request in beta's outbox, like any other.", [["tok","q","reply","req","bOut"],["hot","n-b-out","ok"]]],
+      ["The router picks it up.", [["mv","q","r"]]],
+      ["A reply is bound to the original sender. Whatever address beta put on it, it can only go to alpha.", [["dec",1,"reply → bound to alpha","ok"],["kind","q","ok"]]],
+      ["It arrives in alpha's peer lane, against the direction of the delegation edge. A reply is not a new task.", [["mv","q","aPeer"],["hot","n-a-peer","ok"]]],
+      ["alpha's inbox-delivery injects it into alpha's session.", [["say","a","← reply from beta"],["hot","n-a-sess","ok"]]]
+    ]},
+    held: { name:"A task that was never granted", steps:[
+      ["Now beta tries to start a new task for alpha. It calls submit(to: alpha).", [["say","b","submit(to: alpha)"]]],
+      ["The connector writes the request anyway. It holds no allowlist, so it cannot refuse.", [["tok","q","request","req","bOut"],["hot","n-b-out","ok"]]],
+      ["The router picks it up exactly as before.", [["mv","q","r"]]],
+      ["The graph has no edge from beta to alpha. The router holds the request for the operator.", [["dec",1,"beta → alpha: not granted ✗","bad"],["dec",2,"held · nothing delivered","bad"],["kind","q","bad"],["mv","q","rHold"],["hot","n-r","bad"]]],
+      ["Nothing reaches alpha. The verdict in beta's results, queued_for_human, is the only report of what happened.", [["tok","v","not delivered","bad","r"],["mv","v","bOut"]]]
+    ]},
+    first: { name:"First sight", steps:[
+      ["Before the router has ever polled alpha, something already sits in alpha's outbox.", [["tok","s","staged","req","aStaged"],["hot","n-a-out","bad"]]],
+      ["The router's first poll of alpha takes a snapshot of that outbox.", [["dec",1,"first sight of alpha","n"],["hot","n-r","ok"]]],
+      ["Anything staged before that moment is quarantined and never delivered. Nobody can pre-load requests before the router is watching.", [["kind","s","bad"],["dec",2,"staged file quarantined","bad"]]],
+      ["A request written after first sight is handled normally.", [["tok","q","request","req","aOut"],["mv","q","r"],["kind","q","ok"]]],
+      ["This is why there is no approve step: starting the router is the approval, and it covers only what comes after.", []]
+    ]},
+    mail: { name:"The mail doorbell", steps:[
+      ["Mail needs both sides to list each other. Suppose the operator made alpha and beta mutual mail peers. The example fleet does not.", [["dec",1,"alpha ⇄ beta: mail peers","n"]]],
+      ["alpha submits a message to beta. It is a request, like everything else.", [["say","a","submit(to: beta)"],["tok","q","message","req","aOut"]]],
+      ["The router checks the mutual listing and places the message in beta's read-only inbox.", [["mv","q","bIn"],["kind","q","ok"],["hot","n-b-in","ok"]]],
+      ["beta's inbox-delivery rings a doorbell with no content in it. The message itself stays in the inbox.", [["say","b","(doorbell) new mail"],["hot","n-b-sess","ok"]]],
+      ["beta reads it with the inbox tool. Mail content is untrusted: beta reports what it asks for rather than obeying it.", [["say","b","read_message(…)"]]]
+    ]},
+    icpdeny: { scene:"icp", eyebrow:"The interceptor at work", swipe:"Scroll the diagram sideways to see the lanes →", name:"A create that mounts another member's outbox", steps:[
+      ["A hand-typed command, or a misbehaving script, asks the gateway to create alpha. Among its bind mounts is beta's outbox, read-write.", [["say","a","create alpha"],["txt","i-m1","payload, roster    ro"],["txt","i-m2","alpha/inbox, peer  ro"],["txt","i-m3","alpha/outbox       rw"],["txt","i-m4","beta/outbox        rw  ✗","bad"],["tok","q","create alpha","req","op"],["hot","i-op","ok"]]],
+      ["Admission is off on this gateway, so the Docker driver would accept the mount as given.", [["mv","q","gw"],["hot","i-gw","ok"]]],
+      ["Before any handler runs, the gateway sends the proposed create to the interceptor's validate binding.", [["mv","q","icp"],["hot","i-icp","ok"]]],
+      ["alpha is a fleet member, in the fleet's workspace. But every bind source must be exactly one of the sources rendered for alpha, and beta's outbox is not.", [["dec",1,"alpha: a member ✓","ok"],["dec",2,"beta/outbox: not alpha's ✗","bad"],["kind","q","bad"],["hot","i-bout","bad"]]],
+      ["The gateway returns PERMISSION_DENIED with the interceptor's reason. No handler runs and no sandbox is created, so beta's outbox stays reachable from beta alone. Live, the gateway logged decision=\"deny\".", [["tok","v","PERMISSION_DENIED","bad","icp"],["mv","v","back"],["say","b","not created"],["hot","i-sbx","bad"]]]
+    ]},
+    icpallow: { scene:"icp", eyebrow:"The interceptor at work", swipe:"Scroll the diagram sideways to see the lanes →", name:"The member's own create", steps:[
+      ["provision alpha renders the create: the payload and the roster read-only, alpha's inbox and peer read-only, and alpha's own outbox read-write.", [["say","a","provision alpha --apply"],["txt","i-m1","payload, roster    ro"],["txt","i-m2","alpha/inbox, peer  ro"],["txt","i-m3","alpha/outbox       rw"],["tok","q","create alpha","req","op"],["hot","i-op","ok"]]],
+      ["The gateway sends it to the interceptor, as it does every create.", [["mv","q","gw"],["hot","i-gw","ok"]]],
+      ["The interceptor evaluates it.", [["mv","q","icp"],["hot","i-icp","ok"]]],
+      ["Every source is one of alpha's rendered rows, each read-only flag matches its row, and no source is a symlink.", [["dec",1,"every source alpha's own ✓","ok"],["dec",2,"allow","ok"],["kind","q","ok"]]],
+      ["The gateway creates the sandbox with exactly those mounts. Live, the interceptor logged evaluate allow once for each member.", [["mv","q","sbx"],["say","b","created"],["hot","i-sbx","ok"],["hot","i-aout","ok"]]],
+      ["Fail closed: had the interceptor been down, slow or wrong, the create would have been refused, never passed.", [["dec",2,"fail_closed","n"]]]
+    ]}
+  };
+
+  const screens = [...document.querySelectorAll(".screen")];
+  const whereEl = document.getElementById("where"), nav = document.getElementById("chapters");
+  const bBack = document.getElementById("back"), bNext = document.getElementById("next");
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
+  let cur = 0, step = 0;
+
+  const tpl = document.getElementById("flow-tpl");
+  screens.filter(s => s.dataset.flow).forEach(s => {
+    const f = FLOWS[s.dataset.flow], box = s.querySelector(".flowscreen");
+    box.append(tpl.content.cloneNode(true));
+    box.querySelector(".feye").textContent = f.eyebrow || "Watch it work";
+    box.querySelector(".swipe").textContent = f.swipe || "Scroll the diagram sideways to see beta →";
+    box.querySelector(".ftitle").textContent = f.name;
+    box.querySelector(".fsteps ol").append(...f.steps.map(st => { const li = document.createElement("li"); li.textContent = st[0]; return li; }));
+  });
+
+  const firstOf = CHAPTERS.map((_, c) => screens.findIndex(s => +s.dataset.ch === c));
+  CHAPTERS.forEach((name, c) => {
+    const b = document.createElement("button"); b.type = "button";
+    b.innerHTML = '<span class="fill"><i></i></span><span class="lbl"></span>';
+    b.querySelector(".lbl").textContent = name; b.setAttribute("aria-label", "Go to " + name);
+    b.addEventListener("click", () => go(firstOf[c], 0)); nav.append(b);
+  });
+
+  // Copy buttons: clipboard where allowed, else select the text.
+  document.querySelectorAll(".cmd").forEach(box => {
+    const btn = box.querySelector(".copy"), pre = box.querySelector("pre");
+    btn.addEventListener("click", () => {
+      const text = pre.innerText;
+      const done = () => { btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy", 1500); };
+      const select = () => { const r = document.createRange(); r.selectNodeContents(pre); const s = getSelection(); s.removeAllRanges(); s.addRange(r); btn.textContent = "Selected"; setTimeout(() => btn.textContent = "Copy", 1500); };
+      try { navigator.clipboard.writeText(text).then(done, select); } catch (e) { select(); }
+    });
+  });
+
+  function tokEl(S, id, label, kind, at) {
+    const g = document.createElementNS(NS, "g");
+    g.setAttribute("class", "tok " + kind); g.dataset.id = id;
+    const w = 14 + label.length * 7.4;
+    const r = document.createElementNS(NS, "rect");
+    r.setAttribute("x", -w / 2); r.setAttribute("y", -12); r.setAttribute("width", w); r.setAttribute("height", 24); r.setAttribute("rx", 5);
+    const t = document.createElementNS(NS, "text"); t.setAttribute("text-anchor", "middle"); t.setAttribute("y", 4); t.textContent = label;
+    g.append(r, t); place(S, g, at, false); S.el.querySelector(".toks").append(g);
+  }
+  function place(S, g, at, animate) {
+    const [x, y] = S.P[at];
+    if (!animate) g.style.transition = "none";
+    g.style.transform = "translate(" + x + "px, " + y + "px)";
+    if (!animate) { g.getBoundingClientRect(); g.style.transition = ""; }
+  }
+  function clearScene(S) {
+    S.el.querySelector(".toks").replaceChildren();
+    S.el.querySelectorAll(".dyn").forEach(n => { n.textContent = ""; n.classList.remove("bad"); });
+    S.el.querySelectorAll(".hot,.hotbad").forEach(n => n.classList.remove("hot","hotbad"));
+  }
+  function apply(S, ops, animate) {
+    S.el.querySelectorAll(".hot,.hotbad").forEach(n => n.classList.remove("hot","hotbad"));
+    const byId = i => document.getElementById(i);
+    for (const [k, a, b, c, d] of ops) {
+      const tok = () => S.el.querySelector('.toks [data-id="' + a + '"]');
+      if (k === "tok") tokEl(S, a, b, c, d);
+      else if (k === "mv") { const e = tok(); if (e) place(S, e, b, animate); }
+      else if (k === "kind") { const e = tok(); if (e) e.setAttribute("class", "tok " + b); }
+      else if (k === "dec") { const e = byId(S.pre + "dec" + a); e.textContent = b; e.setAttribute("class", "sc-dec dyn " + c); }
+      else if (k === "say") byId(S.pre + "say-" + a).textContent = b;
+      else if (k === "txt") { const e = byId(a); e.textContent = b; e.classList.toggle("bad", c === "bad"); }
+      else if (k === "hot") byId(a)?.classList.add(b === "bad" ? "hotbad" : "hot");
+    }
+  }
+  function renderFlow(s, animate) {
+    const f = FLOWS[s.dataset.flow], S = SCENES[f.scene || "main"];
+    s.querySelector(".scenebox").append(S.el);
+    clearScene(S);
+    for (let i = 0; i < step; i++) apply(S, f.steps[i][1], false);
+    const ops = f.steps[step][1];
+    apply(S, ops.filter(o => o[0] === "tok"), false);
+    const rest = ops.filter(o => o[0] !== "tok");
+    if (animate && !reduce.matches) requestAnimationFrame(() => requestAnimationFrame(() => apply(S, rest, true)));
+    else apply(S, rest, false);
+    s.querySelector(".caption").textContent = f.steps[step][0];
+    s.querySelector(".count").textContent = "step " + (step + 1) + " of " + f.steps.length;
+    [...s.querySelectorAll(".fsteps li")].forEach((li, i) => li.classList.toggle("on", i === step));
+  }
+  const flowLen = s => s.dataset.flow ? FLOWS[s.dataset.flow].steps.length : 1;
+
+  function show(animate) {
+    screens.forEach((s, i) => s.hidden = i !== cur);
+    const s = screens[cur], ch = +s.dataset.ch;
+    if (s.dataset.flow) renderFlow(s, animate);
+    const inCh = screens.filter(x => +x.dataset.ch === ch), pos = inCh.indexOf(s);
+    [...nav.children].forEach((b, c) => {
+      const pct = c < ch ? 100 : c > ch ? 0 : Math.round(100 * (pos + (step + 1) / flowLen(s)) / inCh.length);
+      b.querySelector("i").style.width = pct + "%";
+      if (c === ch) b.setAttribute("aria-current", "step"); else b.removeAttribute("aria-current");
+    });
+    whereEl.textContent = CHAPTERS[ch] + " · " + (cur + 1) + " of " + screens.length;
+    bBack.disabled = cur === 0;
+    bNext.disabled = cur === screens.length - 1;
+    bNext.textContent = s.dataset.flow && step < flowLen(s) - 1 ? "Next step" : "Next";
+    if (location.hash.slice(1) !== s.dataset.id) history.replaceState(null, "", "#" + s.dataset.id);
+  }
+  function go(i, st) { cur = Math.max(0, Math.min(screens.length - 1, i)); step = st; show(false); }
+  function next() {
+    const s = screens[cur];
+    if (s.dataset.flow && step < flowLen(s) - 1) { step++; show(true); }
+    else if (cur < screens.length - 1) { cur++; step = 0; show(false); }
+  }
+  function back() {
+    const s = screens[cur];
+    if (s.dataset.flow && step > 0) { step--; show(false); }
+    else if (cur > 0) { cur--; step = flowLen(screens[cur]) - 1; show(false); }
+  }
+  bNext.addEventListener("click", next);
+  bBack.addEventListener("click", back);
+  document.addEventListener("keydown", e => {
+    if (e.target.closest && e.target.closest("summary,a,button.copy,input,textarea,pre")) return;
+    if (["ArrowRight","PageDown"," "].includes(e.key)) { e.preventDefault(); next(); }
+    else if (["ArrowLeft","PageUp"].includes(e.key)) { e.preventDefault(); back(); }
+    else if (e.key === "Home") go(0, 0);
+    else if (e.key === "End") go(screens.length - 1, 0);
+  });
+  let tx = null;
+  const stage = document.getElementById("stage");
+  stage.addEventListener("touchstart", e => { tx = e.touches[0].clientX; }, { passive: true });
+  stage.addEventListener("touchend", e => {
+    if (tx === null || e.target.closest(".scenebox,.tablewrap,.cmd")) { tx = null; return; }
+    const dx = e.changedTouches[0].clientX - tx; tx = null;
+    if (dx < -60) next(); else if (dx > 60) back();
+  });
+  window.addEventListener("hashchange", () => {
+    const i = screens.findIndex(s => s.dataset.id === location.hash.slice(1));
+    if (i >= 0 && i !== cur) go(i, 0);
+  });
+  const start = screens.findIndex(s => s.dataset.id === location.hash.slice(1));
+  go(start >= 0 ? start : 0, 0);
+})();
+</script>
+</body>
+</html>

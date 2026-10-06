@@ -1,0 +1,117 @@
+name: repin
+
+# Daily, and on demand: for each pinned sibling whose main has moved, move its
+# pin, run the full suite, and open or refresh one pull request per sibling.
+# It never merges. Each pin is an operator's decision, and the suite proves the
+# offline properties only: the live checks (bring-up, verify, a delegation)
+# need a host.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+# Read-only by default; only the job that opens the pull request gets write.
+permissions:
+  contents: read
+
+concurrency:
+  group: repin
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      stale: ${{ steps.check.outputs.stale }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - id: check
+        run: echo "stale=$(python repin.py check)" >> "$GITHUB_OUTPUT"
+
+  repin:
+    needs: check
+    permissions:
+      contents: write
+      pull-requests: write
+    if: needs.check.outputs.stale != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.check.outputs.stale) }}
+    env:
+      NAME: ${{ matrix.name }}
+      PIN: ${{ matrix.pin }}
+      HEAD: ${{ matrix.head }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: amap-deploy-openshell
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install pytest
+      - name: Move the pin
+        working-directory: amap-deploy-openshell
+        run: python repin.py apply "$NAME" "$HEAD"
+      - name: Sibling checkouts at the new pins
+        working-directory: amap-deploy-openshell
+        run: python amap-openshell.py siblings --apply
+      - name: Suite
+        id: suite
+        working-directory: amap-deploy-openshell
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python -m pytest tests -q 2>&1 | tee "$RUNNER_TEMP/suite.txt"
+      - name: Open or refresh the pull request
+        working-directory: amap-deploy-openshell
+        env:
+          OUTCOME: ${{ steps.suite.outcome }}
+          # Only this step sees the token: no checkout persists a credential,
+          # so the earlier steps (installs, siblings, the suite) cannot push.
+          # gh uses it for the pull request, and `gh auth setup-git` lends it
+          # to git for the push.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          short_pin="${PIN:0:7}"; short_head="${HEAD:0:7}"
+          branch="repin/$NAME"
+          title="Repin $NAME $short_pin → $short_head"
+          if [ "$OUTCOME" = "success" ]; then verdict="passes"; else verdict="FAILS"; fi
+          {
+            echo "Proposed by the repin workflow. **The offline suite $verdict at the new pin.**"
+            echo
+            echo "Not checked here, because it needs a live host: \`bring-up\`, \`verify\`, a delegation, and the tutorial's experiments. Merging this changes what the next \`siblings --apply\` puts on a host."
+            echo
+            echo "### Commits in $NAME, $short_pin..$short_head"
+            echo '```'
+            git -C "../$NAME" log --oneline "$PIN..$HEAD"
+            echo '```'
+            echo "### Files changed in $NAME"
+            echo '```'
+            git -C "../$NAME" diff --stat "$PIN..$HEAD" | tail -n 40
+            echo '```'
+            echo "### The suite"
+            echo '```'
+            tail -n 40 "$RUNNER_TEMP/suite.txt"
+            echo '```'
+          } > "$RUNNER_TEMP/body.md"
+          gh auth setup-git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$branch"
+          git commit -qam "$title"
+          git push --force origin "$branch"
+          if gh pr view "$branch" --json state --jq .state 2>/dev/null | grep -qx OPEN; then
+            gh pr edit "$branch" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          fi

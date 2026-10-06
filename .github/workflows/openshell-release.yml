@@ -1,0 +1,132 @@
+name: openshell-release
+
+# Daily, and on demand: when OpenShell has a release later than the tag the
+# interceptor's protos were vendored from, regenerate the interceptor's stubs
+# and hash locks from that tag, run both suites, and open or refresh one pull
+# request. It never merges. Merging means upgrading the gateway to that release
+# first, and only a live run (verify's V1 to V3, and a provision of each member
+# through the interceptor) proves the interceptor works against it.
+
+on:
+  schedule:
+    - cron: "41 6 * * *"
+  workflow_dispatch:
+
+# Read-only by default; only the job that opens the pull request gets write.
+permissions:
+  contents: read
+
+concurrency:
+  group: openshell-release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - id: check
+        run: echo "release=$(python repin.py openshell-check)" >> "$GITHUB_OUTPUT"
+
+  regen:
+    needs: check
+    permissions:
+      contents: write
+      pull-requests: write
+    if: needs.check.outputs.release != 'null'
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ fromJSON(needs.check.outputs.release).tag }}
+      CURRENT: ${{ fromJSON(needs.check.outputs.release).current }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: amap-deploy-openshell
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install pytest
+      - name: Sibling checkouts at their pins
+        working-directory: amap-deploy-openshell
+        run: python amap-openshell.py siblings --apply
+      - name: OpenShell at the new tag
+        run: git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/OpenShell.git OpenShell
+      - name: Regenerate the stubs and locks
+        working-directory: amap-deploy-openshell
+        run: bash interceptor/regen.sh --openshell ../OpenShell --tag "$TAG" --apply
+      - name: Main suite
+        id: suite
+        working-directory: amap-deploy-openshell
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python -m pytest tests -q 2>&1 | tee "$RUNNER_TEMP/suite.txt"
+      - name: Interceptor suite
+        id: isuite
+        working-directory: amap-deploy-openshell
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python -m venv --system-site-packages "$RUNNER_TEMP/ivenv"
+          "$RUNNER_TEMP/ivenv/bin/pip" install --require-hashes --only-binary=:all: -r interceptor/requirements.txt
+          "$RUNNER_TEMP/ivenv/bin/python" -m pytest interceptor/tests -q 2>&1 | tee "$RUNNER_TEMP/isuite.txt"
+      - name: Open or refresh the pull request
+        working-directory: amap-deploy-openshell
+        env:
+          OUTCOME: ${{ steps.suite.outcome }}
+          IOUTCOME: ${{ steps.isuite.outcome }}
+          # Only this step sees the token: no checkout persists a credential,
+          # so the earlier steps (installs, siblings, the suite) cannot push.
+          # gh uses it for the pull request, and `gh auth setup-git` lends it
+          # to git for the push.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch="openshell/$TAG"
+          title="Needs a live run: OpenShell $CURRENT → $TAG, interceptor stubs regenerated"
+          if [ "$OUTCOME" = "success" ]; then verdict="passes"; else verdict="FAILS"; fi
+          if [ "$IOUTCOME" = "success" ]; then iverdict="passes"; else iverdict="FAILS"; fi
+          {
+            echo "**Needs a live run before merging. Merging means upgrading the gateway to $TAG first.**"
+            echo
+            echo "Proposed by the openshell-release workflow. It regenerated \`interceptor/proto\`, \`interceptor/_gen\` and the hash locks from OpenShell $TAG. The main suite $verdict, and the interceptor suite $iverdict. Neither suite runs OpenShell."
+            echo
+            echo "Review the new proto fields on the mount path (\`CreateSandboxRequest\`, \`SandboxSpec\`, \`SandboxTemplate\`, and the Docker driver's mount schema): the rule's allowlists (R2, R3, R6) refuse a field they do not know until it is reviewed."
+            echo
+            echo "### Changes under interceptor/"
+            echo '```'
+            git diff --stat -- interceptor
+            echo '```'
+            echo "### The protos' diff"
+            echo '```diff'
+            git diff -- interceptor/proto/*.proto | head -n 200
+            echo '```'
+            echo "### The main suite"
+            echo '```'
+            tail -n 40 "$RUNNER_TEMP/suite.txt"
+            echo '```'
+            echo "### The interceptor suite"
+            echo '```'
+            tail -n 40 "$RUNNER_TEMP/isuite.txt"
+            echo '```'
+          } > "$RUNNER_TEMP/body.md"
+          gh auth setup-git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$branch"
+          git add -A interceptor
+          git commit -qm "$title"
+          git push --force origin "$branch"
+          if gh pr view "$branch" --json state --jq .state 2>/dev/null | grep -qx OPEN; then
+            gh pr edit "$branch" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          fi

@@ -1,0 +1,8 @@
+{
+  "siblings": [
+    {"name": "amap-router-local", "url": "https://github.com/proofpoint/amap-router-local", "commit": "e43dbba7ac1a44f06b4fbc5dc8c2ffb2777363c0"},
+    {"name": "amap-connector-claude", "url": "https://github.com/proofpoint/amap-connector-claude", "commit": "37875a5ddd55a266a1545c5a03c8ce3bf3018b9e"},
+    {"name": "amap-deploy-sandy", "url": "https://github.com/proofpoint/amap-deploy-sandy", "commit": "eeecad0b5674c5771d0ed366f01b5e31144d2e89"},
+    {"name": "amap-spec", "url": "https://github.com/proofpoint/amap-spec", "commit": null}
+  ]
+}

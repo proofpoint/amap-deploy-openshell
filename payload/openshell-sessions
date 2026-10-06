@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+"""payload/openshell-sessions: the session lister for an OpenShell sandbox,
+shipped by amap-deploy-openshell on the read-only payload.
+
+It is the AMAP_DELIVERY_SESSION_SOURCE that payload/amap-main sets. The
+connector's delivery daemon (amap-connector-claude, bin/inbox-delivery) runs it
+with no arguments and reads its rows. One row per `claude` process is printed:
+
+    claude<TAB>-<TAB>-<TAB>agent_pid<TAB>socket<TAB>keyfile
+
+The daemon splits a row on any whitespace and reads fields 0, 4 and 5. The
+unused fields, and a socket or key file that does not exist, are the literal
+`-`. A path with whitespace in it is `-` too, so a row always has six fields.
+With no `claude` running it prints nothing and exits 0. A nonzero exit means
+"helper failed" to the daemon, so it is used only for a lister that cannot do
+its job (EXIT_FAILED).
+
+Which process is `claude`. The main process is the command after `--` on
+`openshell sandbox create` (OpenShell main@acbac9c:
+docs/how-it-works/sandboxes/overview.mdx:23), which here is `amap-main`. The
+lister finds it as the outermost ancestor of its own parent that runs
+`amap-main`. The ancestry of a process is kernel-owned, so the agent cannot
+insert itself into it. `claude` is any descendant of that main process that
+runs `claude`. There is no tmux in a sandbox and none is needed.
+
+"Runs X" means the process's comm, or the basename of argv[0], or the basename
+of argv[1] is X. argv[1] covers an interpreter running the script. It is not
+"any argument": `amap-main`'s own argv contains `claude` as an argument.
+
+Two or more `claude` processes give two or more rows, and the daemon then
+refuses the delivery. The lister refuses and does not guess: it never picks
+one. A process in the sandbox can only stop delivery this way, never redirect
+it.
+
+Locations. `/proc` is read-only and `/tmp` is read-write in the baseline
+policy (OpenShell main@acbac9c: docs/how-it-works/policies/default-policy.mdx:
+34,39,67-68). Under a numeric `run_as_user` HOME is the workspace (OpenShell
+main@acbac9c: crates/openshell-sandbox/src/process.rs:217-241).
+
+The socket comes from the hook's record, `$HOME/.claude/amap-sessions/<pid>.json`,
+a JSON object with `socket`, `pid` and `start_time`. Claude Code exports the
+socket to its hooks (its cross-session-messaging page), and its directory is not
+fixed. A record is used only when its `pid` is the row's pid and its
+`start_time` is the process's current start time, so a record left by an earlier
+process with the same pid is ignored.
+
+The key file is the session's own peer key, `$HOME/.claude/sessions/<pid>.<id>.key`,
+which Claude Code writes. It is the same path amap-deploy-sandy's
+`payload/handoff-sessions` reads at eeecad0. This deployment never sets
+CLAUDE_CONFIG_DIR. The key must be a regular file of at most 64 KiB holding a
+JSON object with a non-empty string `peerToken`, which is the connector's
+`_read_token` at 37875a5 (amap-connector-claude, bin/inbox-delivery). Exactly one
+such key is reported. Zero or several give `-`: the lister refuses and never
+guesses. The key column does not depend on the record. The lister never prints a
+token.
+
+The daemon binds its reply socket in the directory of the target's socket, the
+one Claude Code recognises (the connector's `ReplySocket` and `REPLY_SOCK_RE`).
+That directory must be under a read-write path of the policy (`/tmp` or
+`/sandbox`), which L1 checks. A record, like the processes, is writable by the
+agent, so the agent can only stop its own delivery, never redirect it.
+
+Standard library only. Python 3.9 compatible.
+"""
+
+import json
+import os
+import stat
+import sys
+from typing import Dict, List, Optional, Tuple
+
+PROC = "/proc"
+RECORD_SUBDIR = ".claude/amap-sessions"  # under $HOME; written by claude-session-start
+RECORD_NAME = "{pid}.json"
+RECORD_SOCKET = "socket"
+RECORD_PID = "pid"
+RECORD_START = "start_time"
+KEY_SUBDIR = ".claude/sessions"  # under $HOME; written by Claude Code
+KEY_SUFFIX = ".key"
+PEER_TOKEN = "peerToken"  # the connector's _read_token
+# Fields after the comm in /proc/<pid>/stat: proc(5) field 22, starttime.
+START_TIME_INDEX = 19
+AGENT = "claude"
+MAIN = "amap-main"
+UNUSED = "-"
+KEY_READ_LIMIT = 64 * 1024
+EXIT_FAILED = 2
+
+Table = Dict[int, Tuple[str, int]]
+Row = Tuple[str, str, str, str, str, str]
+
+
+class ListerError(Exception):
+    pass
+
+
+def _stat_fields(proc: str, pid: int) -> Optional[Tuple[str, List[str]]]:
+    """(comm, the fields after it) of a process, or None when it is gone or its
+    stat is garbled. comm is between the first "(" and the last ")", because
+    it may itself contain spaces or ")"."""
+    try:
+        with open(os.path.join(proc, str(pid), "stat"), "rb") as fh:
+            text = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    first, last = text.find("("), text.rfind(")")
+    if first < 0 or last < first:
+        return None
+    return text[first + 1:last], text[last + 1:].split()
+
+
+def read_stat(proc: str, pid: int) -> Optional[Tuple[str, int]]:
+    """(comm, ppid) of a process, or None."""
+    entry = _stat_fields(proc, pid)
+    if entry is None:
+        return None
+    try:
+        return entry[0], int(entry[1][1])
+    except (ValueError, IndexError):
+        return None
+
+
+def read_start_time(proc: str, pid: int) -> Optional[str]:
+    """The process's start time in clock ticks since boot, as the text of
+    proc(5) field 22, or None when it is gone or is not all digits."""
+    entry = _stat_fields(proc, pid)
+    if entry is None or len(entry[1]) <= START_TIME_INDEX:
+        return None
+    value = entry[1][START_TIME_INDEX]
+    return value if value.isascii() and value.isdigit() else None
+
+
+def read_argv(proc: str, pid: int) -> List[str]:
+    try:
+        with open(os.path.join(proc, str(pid), "cmdline"), "rb") as fh:
+            raw = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    parts = raw.split("\0")
+    while parts and parts[-1] == "":
+        parts.pop()
+    return parts
+
+
+def process_table(proc: str) -> Table:
+    """Every process with a readable stat. Failing to list `proc` itself is an
+    OSError, and is the caller's."""
+    table: Table = {}
+    for name in os.listdir(proc):
+        if not name.isdigit():
+            continue
+        entry = read_stat(proc, int(name))
+        if entry is not None:
+            table[int(name)] = entry
+    return table
+
+
+def runs(proc: str, table: Table, pid: int, name: str) -> bool:
+    if table[pid][0] == name:
+        return True
+    return any(os.path.basename(a) == name for a in read_argv(proc, pid)[:2])
+
+
+def ancestors(table: Table, start: int) -> List[int]:
+    """`start` first, then each parent. The walk stops at a pid that is not in
+    `table`, at a process that is its own parent, at a parent pid of 0 or less,
+    and after len(table) + 1 steps."""
+    out: List[int] = []
+    pid = start
+    for _ in range(len(table) + 1):
+        if pid not in table:
+            break
+        out.append(pid)
+        ppid = table[pid][1]
+        if ppid == pid or ppid <= 0:
+            break
+        pid = ppid
+    return out
+
+
+def main_process(proc: str, table: Table, start: int) -> int:
+    """The outermost ancestor of `start`, `start` included, that runs MAIN.
+    The nearest one is the wrapper's own forked subshell, which has the same
+    argv; the process that runs `claude` is a child of the outer one."""
+    found = None
+    for pid in ancestors(table, start):
+        if runs(proc, table, pid, MAIN):
+            found = pid
+    if found is None:
+        raise ListerError(
+            "no ancestor of process %d runs %s; this lister is run only by "
+            "the delivery daemon that %s starts" % (start, MAIN, MAIN))
+    return found
+
+
+def descendants(table: Table, root: int) -> List[int]:
+    children: Dict[int, List[int]] = {}
+    for pid, (_, ppid) in table.items():
+        children.setdefault(ppid, []).append(pid)
+    out: List[int] = []
+    seen = {root}
+    queue = [root]
+    while queue:
+        cur = queue.pop()
+        for child in children.get(cur, []):
+            if child not in seen:
+                seen.add(child)
+                out.append(child)
+                queue.append(child)
+    return sorted(out)
+
+
+def field(value: str) -> str:
+    """A row field: the value, or UNUSED when it is empty or has whitespace,
+    which would split it into two fields in the daemon."""
+    if not value or any(ch.isspace() for ch in value):
+        return UNUSED
+    return value
+
+
+def read_record(path: str) -> Optional[dict]:
+    """The record at `path`, or None. It must be a regular file (a symlink is
+    refused) of at most KEY_READ_LIMIT bytes that holds a JSON object."""
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > KEY_READ_LIMIT:
+            return None
+        with open(path, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError, RecursionError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def socket_field(value: object) -> str:
+    """The row field for a recorded socket path: an absolute path that is a
+    socket now, or UNUSED."""
+    if not isinstance(value, str) or not value.startswith("/"):
+        return UNUSED
+    try:
+        is_socket = stat.S_ISSOCK(os.stat(value).st_mode)
+    except (OSError, ValueError):
+        return UNUSED
+    return field(value) if is_socket else UNUSED
+
+
+def socket_for(proc: str, record_dir: str, pid: int) -> str:
+    """The recorded socket of process `pid`, or UNUSED unless its record
+    exists, names this pid (an int, not a bool) and holds the start time the
+    process has now."""
+    path = os.path.join(record_dir, RECORD_NAME.format(pid=pid))
+    doc = read_record(path)
+    if doc is None:
+        return UNUSED
+    recorded = doc.get(RECORD_PID)
+    if not isinstance(recorded, int) or isinstance(recorded, bool) \
+            or recorded != pid:
+        return UNUSED
+    now = read_start_time(proc, pid)
+    if now is None or doc.get(RECORD_START) != now:
+        return UNUSED
+    return socket_field(doc.get(RECORD_SOCKET))
+
+
+def has_peer_token(path: str) -> bool:
+    doc = read_record(path)
+    tok = doc.get(PEER_TOKEN) if doc is not None else None
+    return isinstance(tok, str) and tok != ""
+
+
+def peer_key_for(key_dir: str, pid: int) -> str:
+    """The session's own peer key: exactly one `<pid>.<id>.key` in key_dir
+    with a non-empty string peerToken, else UNUSED. Several are refused."""
+    prefix = "%d." % pid
+    try:
+        names = sorted(os.listdir(key_dir))
+    except OSError:
+        return UNUSED
+    found = [os.path.join(key_dir, n) for n in names
+             if n.startswith(prefix) and n.endswith(KEY_SUFFIX)
+             and len(n) > len(prefix) + len(KEY_SUFFIX)
+             and has_peer_token(os.path.join(key_dir, n))]
+    return field(found[0]) if len(found) == 1 else UNUSED
+
+
+def rows(proc: str, home: str, start: int) -> List[Row]:
+    record_dir = os.path.join(home, RECORD_SUBDIR)
+    key_dir = os.path.join(home, KEY_SUBDIR)
+    table = process_table(proc)
+    main = main_process(proc, table, start)
+    out: List[Row] = []
+    for pid in descendants(table, main):
+        if not runs(proc, table, pid, AGENT):
+            continue
+        out.append((AGENT, UNUSED, UNUSED, str(pid),
+                    socket_for(proc, record_dir, pid),
+                    peer_key_for(key_dir, pid)))
+    return out
+
+
+def main() -> int:
+    home = os.environ.get("HOME", "")
+    if not home:
+        sys.stderr.write("openshell-sessions: HOME is not set or is empty; "
+                         "the records are under it\n")
+        return EXIT_FAILED
+    try:
+        found = rows(PROC, home, os.getppid())
+    except (ListerError, OSError) as e:
+        sys.stderr.write("openshell-sessions: %s\n" % e)
+        return EXIT_FAILED
+    for row in found:
+        sys.stdout.write("\t".join(row) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""payload/claude-session-start: Claude Code's SessionStart hook in an OpenShell
+sandbox, shipped by amap-deploy-openshell on the read-only payload.
+
+payload/claude-settings.json names this file as the hook. Claude Code runs it
+when a session starts, resumes, clears or compacts, and exports the session's
+inbox socket to it as CLAUDE_CODE_MESSAGING_SOCKET (Claude Code's
+cross-session-messaging page). The socket's directory is not fixed, so the
+session lister cannot guess it. This hook records it where the lister reads it.
+
+The record is one file per `claude` process,
+`$HOME/.claude/amap-sessions/<pid>.json`, mode 0600 in a 0700 directory. It is a
+JSON object with exactly `socket`, `pid` and `start_time`, and nothing else.
+`pid` and `start_time` (proc(5) field 22) tie the record to one process, so a
+record left by an earlier process with the same pid is not used. The record is
+not a key file.
+
+The hook never reads CLAUDE_CODE_MESSAGING_TOKEN. That token is how the
+session's own child proves it is the session's own (Claude Code's
+cross-session-messaging page, "The session's inbox socket"; amap-connector-claude
+CLAUDE.md at 37875a5, "Never a descendant of the session it delivers to"). The
+delivery daemon is not that child. The key file the lister reports is the
+session's own peer key, which Claude Code writes.
+
+Which `claude` the hook belongs to. Claude Code runs a hook through a shell, so
+the hook's parent is not always `claude`. The hook takes the nearest ancestor
+of its parent that the lister's own rule says runs `claude`. Each run replaces
+the same record.
+
+Output. Claude Code adds a SessionStart hook's stdout to the session's context,
+so the hook never writes to stdout. Errors go to stderr as
+`claude-session-start: <message>` with exit 1. No message holds the token, the
+record's contents or the environment: only paths, pids and variable names. The
+hook does not read stdin.
+
+HOME is the workspace under a numeric `run_as_user` (OpenShell main@acbac9c:
+crates/openshell-sandbox/src/process.rs:217-241), which is read-write in the
+sandbox's policy.
+
+The process rules are the lister's, `openshell-sessions` in this directory,
+loaded rather than copied.
+
+Standard library only. Python 3.9 compatible.
+"""
+
+import importlib.machinery
+import importlib.util
+import json
+import os
+import stat
+import sys
+import tempfile
+import types
+
+SOCKET_ENV = "CLAUDE_CODE_MESSAGING_SOCKET"
+LISTER_NAME = "openshell-sessions"
+DIR_MODE = 0o700
+FILE_MODE = 0o600
+EXIT_FAILED = 1
+
+
+class HookError(Exception):
+    pass
+
+
+def load_lister(self_dir: str) -> types.ModuleType:
+    path = os.path.join(self_dir, LISTER_NAME)
+    loader = importlib.machinery.SourceFileLoader("openshell_sessions", path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def claude_pid(lister: types.ModuleType, proc: str, start: int) -> int:
+    """The nearest of `start` and its ancestors that runs claude."""
+    table = lister.process_table(proc)
+    for pid in lister.ancestors(table, start):
+        if lister.runs(proc, table, pid, lister.AGENT):
+            return pid
+    raise HookError("no ancestor of process %d runs claude; Claude Code's "
+                    "SessionStart runs this hook" % start)
+
+
+def record_path(lister: types.ModuleType, home: str, pid: int) -> str:
+    return os.path.join(home, lister.RECORD_SUBDIR,
+                        lister.RECORD_NAME.format(pid=pid))
+
+
+def write_record(path: str, doc: dict) -> None:
+    """Replaces the record atomically. The directory must be a real directory,
+    never a link."""
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    if not stat.S_ISDIR(os.lstat(directory).st_mode):
+        raise HookError("%s is not a directory" % directory)
+    os.chmod(directory, DIR_MODE)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".record-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, FILE_MODE)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def main() -> int:
+    sys.dont_write_bytecode = True
+    lister = load_lister(os.path.dirname(os.path.abspath(__file__)))
+    env = os.environ
+    for name in ("HOME", SOCKET_ENV):
+        if not env.get(name):
+            raise HookError("%s is not set or is empty" % name)
+    sock = env[SOCKET_ENV]
+    try:
+        pid = claude_pid(lister, lister.PROC, os.getppid())
+    except lister.ListerError as e:
+        raise HookError(str(e))
+    start = lister.read_start_time(lister.PROC, pid)
+    if start is None:
+        raise HookError("the start time of process %d cannot be read" % pid)
+    write_record(record_path(lister, env["HOME"], pid),
+                 {lister.RECORD_SOCKET: sock, lister.RECORD_PID: pid,
+                  lister.RECORD_START: start})
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        code = main()
+    except (HookError, OSError, ValueError) as e:
+        sys.stderr.write("claude-session-start: %s\n" % e)
+        code = EXIT_FAILED
+    sys.exit(code)

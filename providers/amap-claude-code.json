@@ -1,0 +1,28 @@
+{
+  "id": "amap-claude-code",
+  "display_name": "Claude Code (amap-deploy-openshell)",
+  "description": "Claude Code with a Console API key (D10), reaching only the Anthropic API",
+  "category": "agent",
+  "inference_capable": true,
+  "credentials": [
+    {
+      "name": "api_key",
+      "description": "Anthropic Console API key used by Claude Code",
+      "env_vars": ["ANTHROPIC_API_KEY"],
+      "required": true,
+      "auth_style": "header",
+      "header_name": "x-api-key"
+    }
+  ],
+  "discovery": {"credentials": ["api_key"]},
+  "endpoints": [
+    {
+      "host": "api.anthropic.com",
+      "port": 443,
+      "protocol": "rest",
+      "access": "read-write",
+      "enforcement": "enforce"
+    }
+  ],
+  "binaries": []
+}

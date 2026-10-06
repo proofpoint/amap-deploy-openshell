@@ -1,0 +1,65 @@
+name: tests
+
+# The full suite, against the sibling checkouts at the pins in siblings.json.
+# It runs no OpenShell, Docker or Podman: the suite fakes them.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: amap-deploy-openshell
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install pytest
+      - name: Sibling checkouts at their pins
+        working-directory: amap-deploy-openshell
+        run: python amap-openshell.py siblings --apply
+      - name: Suite
+        working-directory: amap-deploy-openshell
+        run: python -m pytest tests -q
+
+  interceptor:
+    # The gRPC tests over a real unix socket, in the virtualenv built from the
+    # hash-locked interceptor/requirements.txt, with the same pip line that
+    # provision-guest.sh runs. --system-site-packages lets it see pytest only.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: amap-deploy-openshell
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install pytest
+      - name: Sibling checkouts at their pins
+        working-directory: amap-deploy-openshell
+        run: python amap-openshell.py siblings --apply
+      - name: The hash-locked interceptor virtualenv
+        working-directory: amap-deploy-openshell
+        run: |
+          python -m venv --system-site-packages "$RUNNER_TEMP/ivenv"
+          "$RUNNER_TEMP/ivenv/bin/pip" install --require-hashes --only-binary=:all: -r interceptor/requirements.txt
+      - name: Interceptor suite
+        working-directory: amap-deploy-openshell
+        run: |
+          "$RUNNER_TEMP/ivenv/bin/python" -m pytest interceptor/tests -q
