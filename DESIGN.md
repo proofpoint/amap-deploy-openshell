@@ -241,6 +241,8 @@ another person.
 
 The scope above is a design boundary. Each widening below needs the listed
 work first. None of it is planned.
+[Issue #1](https://github.com/proofpoint/amap-deploy-openshell/issues/1)
+tracks it.
 
 **Several operators on one host.**
 
