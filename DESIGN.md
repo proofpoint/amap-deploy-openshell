@@ -285,8 +285,36 @@ tracks it.
     scope (section 7).
   - amap-router-local routes within one host.
   - So a fleet of hosts is **independent fleets, one per host**.
-  - Cross-host delegation is a protocol question. It goes to amap-spec as a
-    proposal first, then needs a router that carries it.
+  - **Between hosts, the runtime's trusted components speak standard mail
+    protocols (D26, the operator's decision, 2026-10-07).** That means SMTP
+    submission or relay between hosts, and LMTP for local delivery.
+    Authenticated submission establishes which agent and router a message
+    comes from. There is no new AMAP-shaped hop.
+  - AMAP stays at the agent boundary: inside each sandbox the spool
+    directories are unchanged.
+  - The draft's Non-goals (section 1.5) say AMAP "is not a mail transport"
+    and "defines no network protocol". Per-hop domain authority, next-hop
+    routing and loop detection are what SMTP relaying already standardises.
+  - On OpenShell the hop is a network path between trusted, host-side
+    components, which the host's own policy allows explicitly. It is not
+    egress from a sandbox, and the spool is still never tunnelled
+    (section 7).
+  - Every agent-facing invariant still binds the composite runtime. Each is
+    already an obligation in draft -00, cited by section name (numbers may
+    change):
+    - exactly one Result per consumed request, even when an inner component
+      fails ("Outbound: Result", 6.1);
+    - accepted only after the provider accepts ("Outbound: Result", 6.1);
+    - the recipient set handed to the provider equals the set evaluated
+      ("Outbound: Submit Request", 5.1);
+    - enforcement by absence ("Inbound: Deliver Notice and Inbound
+      Message": its preamble, and 7.3 "The Inbound Message (body spool)");
+    - the peer write-authority partition ("Volume Layout", 4.1);
+    - attribution by namespace, carried by configuration and never by
+      anything the agent wrote ("Volume Layout", 4.1).
+  - amap-spec PR #17 (issue #12) proposes, for -01, an informative section
+    "Runtimes Built from Several Components" that summarises these. It is
+    not merged, and its wording may change.
 - **Addresses.** Settled by D21. A new fleet's domain is `openshell.<host>.<base>`, derived once by `install` with amap-deploy-sandy's `fleet_policy.derived_fleet_domain`, so two hosts' `alpha` have different addresses, and a sandy fleet on the same machine (`sandy.<host>.<base>`) is a separate namespace. The default base, `internal`, is non-routable, which amap-spec `spec/peer-origin.md` §3 (lines 180-182) allows for a same-host fleet without mail. Cross-host traffic is mail and needs a routable base (`install --fleet-domain-base`).
 - **Operations.** The verbs are per host. A fleet needs per-host inventory and
   a way to roll out sibling pins. The repin workflow proposes pins; it does
