@@ -110,7 +110,7 @@ printed. It refuses a checkout with local changes, naming it. Without
 
 | Sibling | Pin |
 |---|---|
-| amap-router-local | `e43dbba` |
+| amap-router-local | `2e67716` |
 | amap-connector-claude | `37875a5` |
 | amap-deploy-sandy | `eeecad0` |
 | amap-spec | not pinned |
