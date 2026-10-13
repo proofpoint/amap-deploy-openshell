@@ -181,6 +181,16 @@ or **UNKNOWN**, and UNKNOWN is a problem, never a pass: it exits 1. `list` and
   recreated name is a **new instance** with a fresh first sight.
 - **Who may task whom changes.** Edit `task_graph` in `fleet.json`, then
   `router-config --apply`. Never edit `router.json`.
+- **The host runs a host registry (optional, D27).**
+  1. Write `host-registry.json` into the home yourself, from the registry's
+     own documentation. It is never committed.
+  2. Set `"identity": "registry"` in `fleet.json`.
+  3. Run `install --apply`.
+
+  `provision` then registers each member before it creates the sandbox, and
+  mounts the member's identity directory read-only. Without the key nothing
+  changes. DESIGN.md section 10 has the rules, and members created before
+  the switch are provisioned again.
 
 ## Rules that do not change
 

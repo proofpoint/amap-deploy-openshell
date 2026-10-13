@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Tuple
+from typing import (Any, Callable, Dict, List, Mapping, NamedTuple, Optional,
+                    Tuple)
 
+import host_registry
 import l1_kit
 import membership
 import policy
@@ -61,8 +63,144 @@ class Decision(NamedTuple):
 
 
 def allowed_binds(home: str, name: str) -> Dict[str, bool]:
-    """`{source: read_only}` for the rows rendered for `name`."""
+    """`{source: read_only}` for the rows rendered for `name`. With the host
+    registry (D27) the identity directory is added by `_registry_checks`, so
+    the expected set is these rows plus one registry read."""
     return {row.source: row.read_only for row in render.member_rows(home, name)}
+
+
+# The variables a create may not carry when the fleet uses the host registry:
+# payload/amap-main sets them itself, from name.json (D27).
+SELF_ADDRESS_VARIABLES = (render.SELF_ENV, render.PEER_SELF_ENV)
+
+
+def _environments(spec: Any, reasons: List[str]
+                  ) -> List[Tuple[str, Mapping[str, Any]]]:
+    """Every environment a create carries: spec.environment and
+    spec.template.environment, in either spelling."""
+    out: List[Tuple[str, Mapping[str, Any]]] = []
+    if not isinstance(spec, dict):
+        return out
+    present, env = _field(spec, "environment", reasons)
+    if present:
+        if isinstance(env, dict):
+            out.append(("spec.environment", env))
+        else:
+            reasons.append("spec.environment must be an object")
+    t_present, template = _field(spec, "template", reasons)
+    if t_present and isinstance(template, dict):
+        present, env = _field(template, "environment", reasons)
+        if present:
+            if isinstance(env, dict):
+                out.append(("spec.template.environment", env))
+            else:
+                reasons.append("spec.template.environment must be an object")
+    return out
+
+
+def _environment_checks(spec: Any, expected: host_registry.Expected,
+                        reasons: List[str]) -> None:
+    """the identity variables are present and equal the
+    registry's binding, wherever they are given and however the two
+    environments merge; the self-address variables are absent from both."""
+    want = dict(pair.split("=", 1) for pair in render.identity_env(expected))
+    envs = _environments(spec, reasons)
+    for where, env in envs:
+        for key in SELF_ADDRESS_VARIABLES:
+            if key in env:
+                reasons.append(f"{where}.{key} is refused: with the host "
+                               f"registry the address comes only from "
+                               f"name.json")
+    for key, value in want.items():
+        given = [(where, env[key]) for where, env in envs if key in env]
+        if not given:
+            reasons.append(f"the create does not set {key}: the sandbox could "
+                           f"not check its identity")
+            continue
+        for where, got in given:
+            if got != value:
+                reasons.append(f"{where}.{key} is not the host registry's "
+                               f"value")
+
+
+def _registry_checks(spec: Any, mounts: List[Any], name: str, home: str,
+                     fleet: Mapping[str, Any], allowed: Dict[str, bool],
+                     reasons: List[str],
+                     show: Callable = host_registry.show) -> None:
+    """D27, for a member's create when the fleet uses the host registry.
+    The registry is asked one read-only question, `show`; anything but an
+    active binding whose name.json is current refuses. Then the identity
+    directory's row must be present and exact, no other target may overlap
+    its target, no source may touch the registry directory, and the
+    identity variables must equal the binding."""
+    try:
+        cfg = host_registry.load_config(home, keep_out_of=(
+            render.payload_dir(home), render.roster_dir(home),
+            render.instances_dir(home)))
+    except host_registry.ConfigError as e:
+        reasons.append(f"the host registry cannot be used: {e}")
+        return
+    for problem in host_registry.layout_problems(cfg, render.instances_dir(home)):
+        reasons.append(problem)
+    look = show(cfg, policy.workspace_of(dict(fleet)), name)
+    if look.kind != host_registry.BOUND:
+        reasons.append(f"the host registry's show for {name} answers "
+                       f"{look.kind} ({look.code or ''} {look.detail}): only a "
+                       f"registered member may be created".replace(" )", ")"))
+        return
+    b = look.binding
+    domain = fleet[policy.FLEET_DOMAIN_KEY]
+    if b["state"] != "active" or b.get("name_json") != "current":
+        reasons.append(f"the host registry's binding for {name} is "
+                       f"{b['state']} with name.json {b.get('name_json')}")
+        return
+    if b["name"] != name or b["address"] != f"{name}@{domain}":
+        reasons.append(f"the host registry's name and address for {name} are "
+                       f"{b['name']!r}, {b['address']!r}: until the router "
+                       f"keys by logical_id they must be {name!r}, "
+                       f"{name + '@' + domain!r}")
+        return
+    problem = host_registry.identity_dir_problem(cfg, b)
+    if problem:
+        reasons.append(problem)
+        return
+    expected = host_registry.expected_of(cfg, b)
+    allowed[expected.identity_dir] = True
+    rows = [m for m in mounts if isinstance(m, dict)]
+    ident = [m for m in rows if m.get("source") == expected.identity_dir]
+    if len(ident) != 1:
+        reasons.append(f"the create must bind {name}'s identity directory "
+                       f"{expected.identity_dir} exactly once (it has "
+                       f"{len(ident)})")
+    else:
+        m = ident[0]
+        if m.get("target") != render.IDENTITY_TARGET:
+            reasons.append(f"the identity directory must be bound at "
+                           f"{render.IDENTITY_TARGET}, not {m.get('target')}")
+        if m.get("read_only", True) is not True:
+            reasons.append("the identity directory must be bound read-only")
+    for i, m in enumerate(rows):
+        target = m.get("target")
+        if m.get("source") == expected.identity_dir or \
+                not isinstance(target, str):
+            continue
+        if render._overlap(target, render.IDENTITY_TARGET):
+            reasons.append(f"mounts[{i}].target {target} overlaps the identity "
+                           f"target {render.IDENTITY_TARGET}")
+    for i, m in enumerate(rows):
+        src = m.get("source")
+        if not isinstance(src, str) or render.host_path_problem("s", src):
+            continue
+        try:
+            rel = host_registry.relation(src, cfg.registry)
+        except (OSError, ValueError) as e:
+            reasons.append(f"mounts[{i}].source {src} cannot be compared with "
+                           f"the registry directory: {e}")
+            continue
+        if rel != "disjoint":
+            reasons.append(f"mounts[{i}].source {src} touches the host "
+                           f"registry's directory: it is never mounted")
+    _environment_checks(spec, expected, reasons)
 
 
 def _get(obj: Mapping[str, Any], camel: str) -> Tuple[bool, Any, Optional[str]]:
@@ -195,9 +333,11 @@ def _check_mount(i: int, mount: Any, name: Any, allowed: Mapping[str, bool],
 
 
 def check_create(operation: object, home: str,
-                 fleet: Mapping[str, Any]) -> Decision:
+                 fleet: Mapping[str, Any],
+                 show: Callable = host_registry.show) -> Decision:
     """The decision for a proposed CreateSandbox. Pure but for the symlink
-    check (R7d), which reads the host."""
+    check (R7d), which reads the host, and, when the fleet uses the host
+    registry (D27), one read-only `show` and the identity checks."""
     reasons: List[str] = []
     problem = render.home_problem(home)
     if problem:
@@ -238,6 +378,10 @@ def check_create(operation: object, home: str,
         allowed: Dict[str, bool] = {}
         if member and not render.home_problem(home):
             allowed = allowed_binds(home, name)
+            # D27
+            if policy.uses_registry(fleet):
+                _registry_checks(spec, mounts, name, home, fleet, allowed,
+                                 reasons, show)
         # R6, R7
         for i, mount in enumerate(mounts):
             _check_mount(i, mount, name, allowed, reasons)

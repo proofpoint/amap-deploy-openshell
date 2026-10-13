@@ -223,8 +223,11 @@ def test_the_loader_check_writes_no_bytecode_into_the_router(tmp_path):
     t, r = tmp_path / "T", tmp_path / "R"
     t.mkdir()
     for name in ("router_config", "render", "policy", "membership",
-                 "router_link", "provider_profile"):
+                 "router_link", "provider_profile", "host_registry"):
         shutil.copy(REPO / f"{name}.py", t / f"{name}.py")
+    # host_registry loads the shared identity validator from the payload.
+    (t / "payload").mkdir()
+    shutil.copy(REPO / "payload" / "identity-check", t / "payload")
     shutil.copytree(_workspace.ROUTER_ROOT / "router", r / "router",
                     ignore=shutil.ignore_patterns("__pycache__"))
     doc = {"state_dir": str(tmp_path / "s"), "instances_dir": str(tmp_path / "i"),

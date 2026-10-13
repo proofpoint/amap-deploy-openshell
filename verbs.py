@@ -52,6 +52,7 @@ from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tup
 
 import gateway
 import home_record
+import host_registry
 import l1_kit
 import membership
 import openshell_cli
@@ -74,6 +75,9 @@ AUDIT_DIRNAME = "audit"          # the router keeps its audit log here
 FIRST_SEEN_NAME = "first-seen.json"
 HELD_DIRNAME = "held"
 DRY_RUN_LINE = "dry run: nothing was written; add --apply to write"
+# D27: the names provision has registered with the host registry, so an
+# absent registry snapshot is read as a fresh host only when nothing was.
+REGISTERED_RECORD = "registry-members.json"
 
 
 class VerbError(ValueError):
@@ -250,11 +254,25 @@ def plan_install(h: HostArgs, hostname: Optional[str] = None,
                 f"still to provision: {', '.join(left)}; router.json, "
                 f"selected.json and router-state/ are written once every "
                 f"member is recorded")
+    if policy.uses_registry(fleet):
+        # D27: the host registry's config is the operator's to write; install
+        # validates it and creates the identity root it names.
+        try:
+            cfg = host_registry.load_config(home, keep_out_of=(
+                render.payload_dir(home), render.roster_dir(home),
+                render.instances_dir(home)))
+        except host_registry.ConfigError as e:
+            raise VerbError(f"the fleet uses the host registry, but {e}. "
+                            f"Nothing was written (D27)") from None
+        dirs.append((cfg.identity_root, l1_kit.DIR_MODE))
+        notes.append(f"the host registry: {host_registry.CONFIG_NAME} "
+                     f"validated; identity_root {cfg.identity_root}")
     l1_kit.check_types(dirs, files)
     return l1_kit.Plan(home, tuple(dirs), (), tuple(files), tuple(notes))
 
 
-def plan_provision_files(h: HostArgs, fleet: Dict[str, Any], name: str
+def plan_provision_files(h: HostArgs, fleet: Dict[str, Any], name: str,
+                         expected: Optional[host_registry.Expected] = None
                          ) -> Tuple[l1_kit.Plan, render.Rendering]:
     home = h.home
     members = l1_kit.fleet_members(fleet)
@@ -265,7 +283,7 @@ def plan_provision_files(h: HostArgs, fleet: Dict[str, Any], name: str
     l1_kit.require_home_directory(home, must_exist=True)
     _require_real_dirs(home, render.payload_dir(home), render.roster_dir(home))
     rendered = render.render_member(fleet, name, _host(h),
-                                    l1_kit.policy_file(home, name))
+                                    l1_kit.policy_file(home, name), expected)
     dirs = ((posixpath.join(home, l1_kit.POLICIES_DIRNAME), l1_kit.DIR_MODE),
             (posixpath.join(home, l1_kit.COMMANDS_DIRNAME), l1_kit.DIR_MODE))
     files = ((l1_kit.policy_file(home, name),
@@ -379,6 +397,226 @@ def _unknown(why: str) -> int:
     return EXIT_REFUSED
 
 
+# --- the host registry (D27) -------------------------------------------------
+
+class RegistryUnknown(Exception):
+    """Nobody can tell what the host registry holds. Provision stops."""
+
+
+class RegistryGate(NamedTuple):
+    expected: Optional[host_registry.Expected]
+    lines: List[str]
+    stop: Optional[int]          # the exit status when provision ends here
+    config: Optional[host_registry.Config] = None
+
+
+def registry_config(h: HostArgs) -> host_registry.Config:
+    """The host registry's config and every host-side check D27 makes before
+    the registry is asked anything that matters. Fails closed."""
+    home = h.home
+    try:
+        cfg = host_registry.load_config(home, keep_out_of=(
+            render.payload_dir(home), render.roster_dir(home),
+            render.instances_dir(home)))
+    except host_registry.ConfigError as e:
+        raise VerbError(f"the fleet uses the host registry ({policy.IDENTITY_KEY}: "
+                        f"{policy.IDENTITY_REGISTRY}), but {e}. Nothing was "
+                        f"written (D27)") from None
+    probs = (host_registry.ownership_problems(cfg)
+             + host_registry.layout_problems(cfg, render.instances_dir(home)))
+    if probs:
+        raise VerbError("the host registry's layout is refused (D27):\n  "
+                        + "\n  ".join(probs))
+    speaks, why = host_registry.version(cfg)
+    if speaks is None:
+        raise RegistryUnknown(f"the host registry's version cannot be read: {why}")
+    if not speaks:
+        raise VerbError(f"the host registry does not list the interface "
+                        f"{host_registry.CONFIG_NAME} names: check its "
+                        f"`interface` and the registry's version")
+    return cfg
+
+
+def registered_names(home: str) -> Optional[List[str]]:
+    """The names provision has registered on this host, from
+    REGISTERED_RECORD: [] when it is absent, None when it cannot be read."""
+    path = posixpath.join(home, REGISTERED_RECORD)
+    try:
+        doc = host_registry.strict_loads(Path(path).read_bytes())
+    except FileNotFoundError:
+        return []
+    except (OSError, host_registry.Refused):
+        return None
+    names = doc.get("names") if isinstance(doc, dict) else None
+    if not isinstance(names, list) or \
+            not all(isinstance(n, str) for n in names):
+        return None
+    return names
+
+
+def _remember(home: str, name: str) -> None:
+    names = registered_names(home)
+    if names is None:
+        raise VerbError(f"{posixpath.join(home, REGISTERED_RECORD)} cannot be "
+                        f"read; fix or remove it by hand")
+    if name in names:
+        return
+    path = posixpath.join(home, REGISTERED_RECORD)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"names": sorted([*names, name])}, fh, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def _not_fresh(cfg: host_registry.Config, home: str) -> Optional[str]:
+    """Why an absent registry snapshot is NOT a fresh host, or None.
+    Fresh means the identity root is empty and nothing was ever registered
+    here."""
+    names = registered_names(home)
+    if names is None:
+        return f"{REGISTERED_RECORD} cannot be read"
+    if names:
+        return (f"{REGISTERED_RECORD} records {', '.join(names)} as already "
+                f"registered")
+    held = host_registry.entries(cfg.identity_root)
+    if held is None:
+        return f"identity_root {cfg.identity_root} cannot be listed"
+    if held:
+        return f"identity_root {cfg.identity_root} is not empty"
+    return None
+
+
+def _refuse_lookup(look: host_registry.Lookup, op: str) -> None:
+    """Raises for a lookup that is not an answer (the status table)."""
+    if look.kind == host_registry.BROKEN:
+        raise VerbError(f"the host registry refused {op} with {look.code}: "
+                        f"its configuration is broken ({look.detail}). Fix "
+                        f"it; nothing was written")
+    if look.kind == host_registry.DEFECT:
+        raise VerbError(f"the host registry refused {op} as a bad request: "
+                        f"this repository's defect ({look.detail})")
+    raise RegistryUnknown(f"the host registry's {op} answer cannot be used: "
+                          f"{look.code or ''} {look.detail}".strip())
+
+
+def interim_problems(binding: Mapping[str, Any], name: str,
+                     fleet: Mapping[str, Any]) -> List[str]:
+    """until the router keys by logical_id, the registry's name is the
+    sandbox name and its address is <name>@<fleet_domain>."""
+    probs: List[str] = []
+    domain = fleet[policy.FLEET_DOMAIN_KEY]
+    if binding["name"] != name:
+        probs.append(f"the host registry names {name!r} {binding['name']!r}: "
+                     f"names must equal sandbox names until the router keys "
+                     f"instances by logical_id")
+    got_domain = binding["address"].rpartition("@")[2]
+    if got_domain != domain:
+        probs.append(f"registry domain {got_domain!r} is not the fleet "
+                     f"domain {domain!r}: one domain per registry, and it "
+                     f"must be {policy.FLEET_DOMAIN_KEY}")
+    elif binding["address"] != f"{name}@{domain}":
+        probs.append(f"the host registry's address {binding['address']!r} is "
+                     f"not {name}@{domain}")
+    return probs
+
+
+def _register(cfg: host_registry.Config, workspace: str, name: str
+              ) -> host_registry.Registration:
+    """register, retried once when the outcome is UNDELIVERED or UNKNOWN:
+    register is idempotent, and a retry redelivers name.json."""
+    r = host_registry.register(cfg, workspace, name)
+    if r.outcome in (host_registry.UNDELIVERED, host_registry.UNKNOWN):
+        r = host_registry.register(cfg, workspace, name)
+    if r.outcome == host_registry.REGISTERED:
+        return r
+    if r.outcome == host_registry.UNDELIVERED:
+        raise VerbError(f"{name} is registered with the host registry, but its "
+                        f"name.json was not delivered ({r.code}: {r.detail}). "
+                        f"No sandbox was created; fix the cause and run "
+                        f"provision again")
+    if r.outcome == host_registry.UNKNOWN:
+        raise RegistryUnknown(f"whether {name} was registered cannot be told "
+                              f"({r.code or ''} {r.detail}); no sandbox was "
+                              f"created; run provision again")
+    if r.code in host_registry.DEFECT_CODES:
+        raise VerbError(f"the host registry refused register as a bad request: "
+                        f"this repository's defect ({r.detail})")
+    raise VerbError(f"the host registry refused to register {name} "
+                    f"({r.code}: {r.detail}); nothing was registered")
+
+
+def registry_gate(h: HostArgs, fleet: Dict[str, Any], name: str,
+                  apply: bool) -> RegistryGate:
+    """Everything provision does with the host registry before `sandbox
+    create` (D27): the pre-check that keeps a name from being minted, the
+    registration, and the gate that lets the create go ahead only on a
+    registered, delivered, matching identity."""
+    cfg = registry_config(h)
+    ws = policy.workspace_of(fleet)
+    lines: List[str] = []
+    look = host_registry.show(cfg, ws, name)
+    binding: Optional[Dict[str, Any]] = None
+    if look.kind == host_registry.BOUND:
+        binding = look.binding
+        probs = interim_problems(binding, name, fleet)
+        if probs:
+            raise VerbError("\n".join(probs))
+        lines.append(f"present registration {name} ({binding['logical_id']})")
+    elif look.kind == host_registry.UNBOUND:
+        listed = host_registry.list_bindings(cfg)
+        if listed.kind != host_registry.BOUND:
+            _refuse_lookup(listed, "list")
+        for b in listed.bindings:
+            if b.get("name") == name:
+                raise VerbError(
+                    f"the name {name!r} is held by the host registry's "
+                    f"{b.get('state')} identity {b.get('logical_id')}: a new "
+                    f"registration would mint another name. Nothing was "
+                    f"registered. A retired name is never reissued")
+    elif look.kind == host_registry.EMPTY:
+        why = _not_fresh(cfg, h.home)
+        if why:
+            raise RegistryUnknown(
+                f"the host registry has no snapshot, but {why}: a lost "
+                f"registry must never mint new identities for existing "
+                f"members. Restore the registry; nothing was registered")
+        lines.append("the host registry is empty: a fresh host")
+    else:
+        _refuse_lookup(look, "show")
+    if binding is None:
+        if not apply:
+            lines.append(f"would register {name} with the host registry; the "
+                         f"create command is rendered after registration")
+            return RegistryGate(None, lines, 0, cfg)
+        reg = _register(cfg, ws, name)
+        lines.append(f"registered {name} ({reg.binding['logical_id']})")
+    look = host_registry.show(cfg, ws, name)
+    if look.kind != host_registry.BOUND:
+        if look.kind in (host_registry.UNBOUND, host_registry.EMPTY):
+            raise RegistryUnknown(f"{name} was registered, but the host "
+                                  f"registry's show answers {look.code}")
+        _refuse_lookup(look, "show")
+    binding = look.binding
+    probs = interim_problems(binding, name, fleet)
+    problem = host_registry.identity_dir_problem(cfg, binding)
+    if problem:
+        probs.append(problem)
+    if binding.get("name_json") != "current":
+        probs.append(f"the host registry reports {name}'s name.json as "
+                     f"{binding.get('name_json')}, not current")
+    expected = host_registry.expected_of(cfg, binding)
+    if not problem:
+        probs += host_registry.name_json_problems(binding["identity_dir"],
+                                                  expected)
+    if probs:
+        raise VerbError(f"no sandbox is created for {name}: its registration "
+                        f"is not usable (D27):\n  " + "\n  ".join(probs))
+    if apply:
+        _remember(h.home, name)
+    return RegistryGate(expected, lines, None, cfg)
+
+
 def run_provision(args: argparse.Namespace,
                   env: Optional[Mapping[str, str]] = None) -> int:
     """`env` replaces `os.environ` for this call; `bring-up` passes the
@@ -386,7 +624,20 @@ def run_provision(args: argparse.Namespace,
     h = host_args(args, env)
     name = args.name
     fleet = loaded_fleet(h)
-    files_plan, rendered = plan_provision_files(h, fleet, name)
+    gate: Optional[RegistryGate] = None
+    if policy.uses_registry(fleet):
+        if name not in l1_kit.fleet_members(fleet):
+            raise VerbError(f"{name!r} is not a member of the fleet "
+                            f"({', '.join(l1_kit.fleet_members(fleet))})")
+        try:
+            gate = registry_gate(h, fleet, name, args.apply)
+        except RegistryUnknown as e:
+            return _unknown(str(e))
+        if gate.stop is not None:
+            _emit(gate.lines, False)
+            return gate.stop
+    files_plan, rendered = plan_provision_files(
+        h, fleet, name, gate.expected if gate else None)
     client = client_for(h, fleet)
     workspace = rendered.workspace
     known = recorded(h) or []
@@ -422,6 +673,8 @@ def run_provision(args: argparse.Namespace,
                         f"the environment (D10). Nothing was written")
 
     lines = l1_kit.carry_out(files_plan, args.apply) + lines
+    if gate is not None:
+        lines = gate.lines + lines
     if (observed is not None and not args.apply
             and router_config.create_lanes(h.home, name, dry_run=True)):
         lines.append(f"would record {name} in membership.json with ID "
@@ -460,6 +713,14 @@ def run_provision(args: argparse.Namespace,
         if problem:
             raise VerbError(problem)
         observed = membership.Member(workspace, name, str(doc["id"]))
+        if gate is not None and gate.config is not None:
+            again = host_registry.register(gate.config, workspace, name,
+                                           incarnation=observed.id)
+            if again.outcome != host_registry.REGISTERED:
+                lines.append(f"warning: re-registering {name} with its "
+                             f"incarnation {observed.id} gave "
+                             f"{again.outcome} ({again.code or ''}); verify "
+                             f"reports it")
     assert observed is not None
     lines += l1_kit.carry_out(plan_record(h, observed), args.apply)
     _emit(lines, args.apply)
@@ -505,6 +766,9 @@ def run_deprovision(args: argparse.Namespace) -> int:
             raise VerbError(f"`sandbox delete {name}` failed "
                             f"({openshell_cli.first_line(gone.stderr)}); "
                             f"nothing else was changed")
+    if policy.uses_registry(fleet):
+        lines.append(f"{name}'s host registry identity is kept: deprovision "
+                     f"never retires it, and provision reuses it")
     _emit(lines + l1_kit.carry_out(plan, args.apply), args.apply)
     return 0
 
@@ -619,10 +883,45 @@ def held_warnings(home: str, roots: Sequence[str]) -> List[str]:
             for p in held_requests(home, roots)]
 
 
+def registry_notes(h: HostArgs) -> List[str]:
+    """D27, for teardown: the identities the host registry keeps for this
+    fleet. Nothing here retires one; retiring is the registry's own operator
+    verb, and it makes the name permanently unprovisionable while names must
+    equal sandbox names."""
+    try:
+        fleet = policy.load_fleet(l1_kit.fleet_json(h.home))
+    except (policy.PolicyError, OSError):
+        return []
+    if not policy.uses_registry(fleet):
+        return []
+    try:
+        cfg = host_registry.load_config(h.home)
+    except host_registry.ConfigError as e:
+        return [f"note: the host registry cannot be read ({e}); the identities "
+                f"it keeps for this fleet are not listed"]
+    listed = host_registry.list_bindings(cfg)
+    if listed.kind != host_registry.BOUND:
+        return [f"note: the host registry's list cannot be used "
+                f"({listed.code or ''} {listed.detail}); the identities it "
+                f"keeps for this fleet are not listed"]
+    members = set(l1_kit.fleet_members(fleet))
+    out = []
+    for b in listed.bindings:
+        if b.get("adapter") == host_registry.ADAPTER and b.get("name") in members:
+            out.append(f"note: the host registry keeps identity "
+                       f"{b['logical_id']} ({b['name']}, {b['state']}). "
+                       f"Teardown does not retire it. Retiring it makes "
+                       f"{b['name']} permanently unprovisionable while names "
+                       f"must equal sandbox names")
+    return out
+
+
 def run_teardown(args: argparse.Namespace) -> int:
     h = host_args(args)
     plan = plan_teardown(h)
     home = h.home
+    for line in registry_notes(h):
+        print(line)
     state = router_config.default_state_dir(home)
     if os.path.isdir(state) and not os.path.islink(state):
         for line in held_warnings(home, [state]):

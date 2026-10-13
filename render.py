@@ -60,6 +60,7 @@ import re
 from typing import (Any, Dict, List, Mapping, NamedTuple, Optional, Sequence,
                     Tuple)
 
+import host_registry
 import membership
 import policy
 import provider_profile
@@ -106,6 +107,10 @@ MOUNT_ROOT = "/opt/amap"
 PAYLOAD_TARGET = MOUNT_ROOT + "/payload"
 ROSTER_TARGET = MOUNT_ROOT + "/roster"
 LANES_TARGET = MOUNT_ROOT + "/lanes"
+# D27: the host registry's per-identity directory, bound read-only as a
+# directory (never name.json alone), when the fleet uses the registry.
+IDENTITY_ROLE = "identity"
+IDENTITY_TARGET = MOUNT_ROOT + "/identity"
 
 # The image's WORKDIR is the workspace (OpenShell
 # main@acbac9c:docs/how-it-works/sandboxes/runtimes.mdx:275; image/Dockerfile).
@@ -210,6 +215,9 @@ class Rendering(NamedTuple):
     policy: Dict[str, Any]
     policy_yaml: str
     argv: List[str]
+    # D27: the identity the sandbox must find in name.json, or None when the
+    # fleet does not use the host registry.
+    expected: Optional[host_registry.Expected] = None
 
 
 # --- the configured identity and the host -----------------------------------
@@ -339,6 +347,16 @@ def member_rows(home: str, name: str) -> Tuple[Mount, ...]:
     return tuple(rows)
 
 
+def identity_row(identity_dir: str) -> Mount:
+    """D27: the identity directory's row, kept out of `member_rows` so that
+    table stays a function of the home and the name. Read-only, a directory,
+    at IDENTITY_TARGET."""
+    reason = host_path_problem("identity_dir", identity_dir)
+    if reason:
+        raise RenderError(reason)
+    return Mount(IDENTITY_ROLE, identity_dir, IDENTITY_TARGET, True)
+
+
 def mount_table(host: Host, name: str) -> Tuple[Mount, ...]:
     """The table for a host description: the name, then the host, are checked
     first, and the rows are `member_rows`."""
@@ -446,16 +464,33 @@ def main_process() -> List[str]:
             BYPASS_PERMISSIONS_FLAG]
 
 
-def env_pairs(mounts: Sequence[Mount], address: str) -> List[str]:
+def identity_env(expected: host_registry.Expected) -> List[str]:
+    """D27: what payload/identity-check reads. The self-address variables are
+    not rendered: payload/amap-main sets them from name.json once it matches
+    this."""
+    ic = host_registry.identity_check
+    return [f"{ic.ENV_DIR}={IDENTITY_TARGET}",
+            f"{ic.ENV_SCHEMA}={expected.schema}",
+            f"{ic.ENV_NAME}={expected.name}",
+            f"{ic.ENV_ADDRESS}={expected.address}",
+            f"{ic.ENV_LOGICAL_ID}={expected.logical_id}",
+            f"{ic.ENV_EPOCH}={expected.epoch}"]
+
+
+def env_pairs(mounts: Sequence[Mount], address: str,
+              expected: Optional[host_registry.Expected] = None) -> List[str]:
     """`--env` reaches every process in the sandbox (OpenShell
     main@acbac9c:docs/how-it-works/providers/overview.mdx:366-374).
 
     The lanes, then the member's address twice (SELF_ENV for payload/amap-main,
     PEER_SELF_ENV for inbox-submit), then the roster mount's target as
-    ROSTER_ENV."""
+    ROSTER_ENV. With an expected identity (D27) the address pair is replaced
+    by `identity_env`."""
+    self_pairs = (identity_env(expected) if expected is not None
+                  else [f"{SELF_ENV}={address}", f"{PEER_SELF_ENV}={address}"])
     return ([f"{LANE_ENV[m.role]}={m.target}" for m in mounts
              if m.role in LANE_ENV]
-            + [f"{SELF_ENV}={address}", f"{PEER_SELF_ENV}={address}"]
+            + self_pairs
             + [f"{ROSTER_ENV}={m.target}" for m in mounts
                if m.role == ROSTER_DIRNAME])
 
@@ -470,7 +505,9 @@ def _path_problem(what: str, path: object) -> Optional[str]:
 
 def create_argv(workspace: str, name: str, host: Host, policy_path: str,
                 mounts: Sequence[Mount], address: str,
-                openshell: str = "openshell") -> List[str]:
+                openshell: str = "openshell",
+                expected: Optional[host_registry.Expected] = None
+                ) -> List[str]:
     """The `openshell sandbox create` argument vector.
 
     Flags, at OpenShell main@acbac9c:crates/openshell-cli/src/main.rs: the
@@ -493,7 +530,7 @@ def create_argv(workspace: str, name: str, host: Host, policy_path: str,
             "--name", name, "--from", host.image, "--provider", PROVIDER,
             "--auto-providers", "--policy", policy_path,
             "--driver-config-json", driver_config_json(mounts)]
-    for pair in env_pairs(mounts, address):
+    for pair in env_pairs(mounts, address, expected):
         argv += ["--env", pair]
     if host.restart_policy:
         argv += ["--restart-policy", RESTART_POLICY]
@@ -504,7 +541,9 @@ def create_argv(workspace: str, name: str, host: Host, policy_path: str,
 
 
 def render_from_table(fleet: Dict[str, Any], name: str, host: Host,
-                      policy_path: str, mounts: Tuple[Mount, ...]) -> Rendering:
+                      policy_path: str, mounts: Tuple[Mount, ...],
+                      expected: Optional[host_registry.Expected] = None
+                      ) -> Rendering:
     """Renders `mounts` as given. It runs no checks: `render_member` does."""
     workspace = policy.workspace_of(fleet)
     address = policy.addresses(fleet, [name])[name]
@@ -512,7 +551,8 @@ def render_from_table(fleet: Dict[str, Any], name: str, host: Host,
     return Rendering(name, workspace, address, tuple(mounts), doc,
                      policy_yaml(doc),
                      create_argv(workspace, name, host, policy_path, mounts,
-                                 address))
+                                 address, expected=expected),
+                     expected)
 
 
 # --- the checker -------------------------------------------------------------
@@ -541,6 +581,8 @@ def _expected_source(host: Host, name: str, role: str) -> Optional[str]:
 
 
 def _expected_target(role: str) -> Optional[str]:
+    if role == IDENTITY_ROLE:
+        return IDENTITY_TARGET
     if role == PAYLOAD_DIRNAME:
         return PAYLOAD_TARGET
     if role == ROSTER_DIRNAME:
@@ -658,22 +700,32 @@ def rendering_problems(r: Rendering, host: Host) -> List[str]:
     # f. sources
     expected = {payload_dir(host.home), roster_dir(host.home)}
     expected |= {lane_dir(host.home, r.name, lane) for lane in LANES}
+    roles = [PAYLOAD_DIRNAME, ROSTER_DIRNAME, *LANES]
+    if r.expected is not None:
+        expected.add(r.expected.identity_dir)
+        roles.append(IDENTITY_ROLE)
     actual = {m.source for m in r.mounts}
     if actual != expected:
         probs.append(f"the mount sources are {sorted(actual)}, expected "
                      f"exactly {sorted(expected)}: only this member's lanes, "
-                     f"the payload and the roster may be mounted")
+                     f"the payload and the roster may be mounted"
+                     + (", and its identity directory"
+                        if r.expected is not None else ""))
     for m in r.mounts:
-        want = _expected_source(host, r.name, m.role)
+        if m.role == IDENTITY_ROLE and r.expected is not None:
+            want = r.expected.identity_dir
+        else:
+            want = _expected_source(host, r.name, m.role)
         if want is None:
             probs.append(f"the mount role {m.role!r} is not one this member has")
         elif m.source != want:
             probs.append(f"the {m.role} mount source is {m.source}, expected "
                          f"{want}")
-    if sorted(m.role for m in r.mounts) != \
-            sorted([PAYLOAD_DIRNAME, ROSTER_DIRNAME, *LANES]):
+    if sorted(m.role for m in r.mounts) != sorted(roles):
         probs.append("the mounts are not exactly the payload, the roster and "
-                     "each lane once (source check)")
+                     "each lane once"
+                     + (", and the identity directory" if r.expected is not None
+                        else "") + " (source check)")
 
     # g. identity
     want_proc = {"run_as_user": str(host.run_as.uid),
@@ -710,10 +762,19 @@ def rendering_problems(r: Rendering, host: Host) -> List[str]:
 
 
 def render_member(fleet: Dict[str, Any], name: str, host: Host,
-                  policy_path: str) -> Rendering:
-    """The public entry point. It fails closed on any problem."""
+                  policy_path: str,
+                  expected: Optional[host_registry.Expected] = None
+                  ) -> Rendering:
+    """The public entry point. It fails closed on any problem. `expected` is
+    the identity from the host registry (D27): its directory is added to the
+    table, and its values replace the self-address variables."""
     mounts = mount_table(host, name)
-    r = render_from_table(fleet, name, host, policy_path, mounts)
+    if expected is not None:
+        if expected.name != name:
+            raise RenderError(f"the host registry's name {expected.name!r} is "
+                              f"not the sandbox name {name!r} (D27)")
+        mounts = mounts + (identity_row(expected.identity_dir),)
+    r = render_from_table(fleet, name, host, policy_path, mounts, expected)
     probs = rendering_problems(r, host)
     if probs:
         raise RenderError("\n".join(probs))

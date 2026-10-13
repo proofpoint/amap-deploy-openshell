@@ -53,6 +53,13 @@ CORE_NAMES = ("PolicyError", "load_policy", "default_policy", "resolve_peers",
               "derived_fleet_domain", "DEFAULT_DOMAIN_BASE")
 
 WORKSPACE_KEY = "workspace"
+# D27: whether members register with the host registry. Absent, or "legacy",
+# is today's behaviour; "registry" turns registration on. amap-deploy-sandy's
+# policy carries the same key, and its load_policy keeps it.
+IDENTITY_KEY = "identity"
+IDENTITY_LEGACY = "legacy"
+IDENTITY_REGISTRY = "registry"
+IDENTITY_MODES = (IDENTITY_LEGACY, IDENTITY_REGISTRY)
 
 # Keys only a sandy feature manifest carries.
 MANIFEST_KEYS = ("feature", "schema", "create", "mounts", "entry", "expose",
@@ -250,6 +257,10 @@ def load_fleet(path: Union[str, os.PathLike]) -> Dict[str, Any]:
     reason = membership.workspace_problem(workspace)
     if reason:
         raise PolicyError(f"{p}: {WORKSPACE_KEY}: {reason}")
+    if IDENTITY_KEY in raw and raw[IDENTITY_KEY] not in IDENTITY_MODES:
+        raise PolicyError(
+            f"{p}: {IDENTITY_KEY!r} is {raw[IDENTITY_KEY]!r}; it must be one of "
+            f"{', '.join(repr(m) for m in IDENTITY_MODES)} (D27)")
 
     with _sandy_errors():
         policy = _fp.load_policy(p)
@@ -271,6 +282,12 @@ def load_fleet(path: Union[str, os.PathLike]) -> Dict[str, Any]:
 
 def workspace_of(policy: Dict[str, Any]) -> str:
     return policy[WORKSPACE_KEY]
+
+
+def uses_registry(policy: Mapping[str, Any]) -> bool:
+    """Whether members register with the host registry (D27). Only the
+    switch decides: no file's presence or absence does."""
+    return policy.get(IDENTITY_KEY, IDENTITY_LEGACY) == IDENTITY_REGISTRY
 
 
 def named_instances(policy: Dict[str, Any]) -> List[str]:

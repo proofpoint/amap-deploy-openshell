@@ -1,0 +1,128 @@
+{
+ "intercept": {
+  "alpha_other_outbox": {
+   "allowed": false,
+   "reasons": [
+    "bind source <HOME>/instances/beta/outbox is not one alpha may mount (only the payload, the roster and its own instances/<name>/<lane>)"
+   ]
+  },
+  "alpha_rendered": {
+   "allowed": true,
+   "reasons": []
+  },
+  "alpha_with_env": {
+   "allowed": true,
+   "reasons": []
+  },
+  "beta_rendered": {
+   "allowed": true,
+   "reasons": []
+  },
+  "no_mounts": {
+   "allowed": true,
+   "reasons": []
+  },
+  "wrong_ws": {
+   "allowed": false,
+   "reasons": [
+    "workspaceScope.workspace 'other' is not the fleet's workspace 'default'"
+   ]
+  }
+ },
+ "render": {
+  "alpha": {
+   "address": "alpha@agents.example.org",
+   "argv": [
+    "openshell",
+    "--workspace",
+    "default",
+    "sandbox",
+    "create",
+    "--name",
+    "alpha",
+    "--from",
+    "amap-openshell-agent:test",
+    "--provider",
+    "amap-claude-code",
+    "--auto-providers",
+    "--policy",
+    "/srv/golden-home/policies/alpha.yaml",
+    "--driver-config-json",
+    "{\"docker\":{\"mounts\":[{\"read_only\":true,\"source\":\"/srv/golden-home/payload\",\"target\":\"/opt/amap/payload\",\"type\":\"bind\"},{\"read_only\":true,\"source\":\"/srv/golden-home/roster\",\"target\":\"/opt/amap/roster\",\"type\":\"bind\"},{\"read_only\":true,\"source\":\"/srv/golden-home/instances/alpha/inbox\",\"target\":\"/opt/amap/lanes/inbox\",\"type\":\"bind\"},{\"read_only\":true,\"source\":\"/srv/golden-home/instances/alpha/peer\",\"target\":\"/opt/amap/lanes/peer\",\"type\":\"bind\"},{\"read_only\":false,\"source\":\"/srv/golden-home/instances/alpha/outbox\",\"target\":\"/opt/amap/lanes/outbox\",\"type\":\"bind\"}]}}",
+    "--env",
+    "AMAP_INBOX_DIR=/opt/amap/lanes/inbox",
+    "--env",
+    "AMAP_PEER_DIR=/opt/amap/lanes/peer",
+    "--env",
+    "AMAP_OUTBOX_DIR=/opt/amap/lanes/outbox",
+    "--env",
+    "AMAP_SELF_ADDRESS=alpha@agents.example.org",
+    "--env",
+    "AMAP_SELF=alpha@agents.example.org",
+    "--env",
+    "AMAP_ROSTER_DIR=/opt/amap/roster",
+    "--restart-policy",
+    "on-failure",
+    "--detach",
+    "--tty",
+    "--",
+    "/opt/amap/payload/amap-main",
+    "--mcp-config",
+    "/opt/amap/payload/mcp-servers.json",
+    "--append-system-prompt-file",
+    "/opt/amap/payload/INBOX-POLICY.md",
+    "--settings",
+    "/opt/amap/payload/claude-settings.json",
+    "--dangerously-skip-permissions"
+   ],
+   "policy_yaml": "# Sandbox policy rendered by amap-openshell. Re-render it; do not edit it.\nversion: 1\nfilesystem_policy:\n  include_workdir: false\n  read_only:\n    - \"/bin\"\n    - \"/usr\"\n    - \"/lib\"\n    - \"/proc\"\n    - \"/dev/urandom\"\n    - \"/etc\"\n    - \"/var/log\"\n    - \"/opt/amap/payload\"\n    - \"/opt/amap/roster\"\n    - \"/opt/amap/lanes/inbox\"\n    - \"/opt/amap/lanes/peer\"\n  read_write:\n    - \"/sandbox\"\n    - \"/tmp\"\n    - \"/dev/null\"\n    - \"/opt/amap/lanes/outbox\"\nlandlock:\n  compatibility: \"hard_requirement\"\nprocess:\n  run_as_user: \"1234\"\n  run_as_group: \"5678\"\n"
+  },
+  "beta": {
+   "address": "beta@agents.example.org",
+   "argv": [
+    "openshell",
+    "--workspace",
+    "default",
+    "sandbox",
+    "create",
+    "--name",
+    "beta",
+    "--from",
+    "amap-openshell-agent:test",
+    "--provider",
+    "amap-claude-code",
+    "--auto-providers",
+    "--policy",
+    "/srv/golden-home/policies/beta.yaml",
+    "--driver-config-json",
+    "{\"docker\":{\"mounts\":[{\"read_only\":true,\"source\":\"/srv/golden-home/payload\",\"target\":\"/opt/amap/payload\",\"type\":\"bind\"},{\"read_only\":true,\"source\":\"/srv/golden-home/roster\",\"target\":\"/opt/amap/roster\",\"type\":\"bind\"},{\"read_only\":true,\"source\":\"/srv/golden-home/instances/beta/inbox\",\"target\":\"/opt/amap/lanes/inbox\",\"type\":\"bind\"},{\"read_only\":true,\"source\":\"/srv/golden-home/instances/beta/peer\",\"target\":\"/opt/amap/lanes/peer\",\"type\":\"bind\"},{\"read_only\":false,\"source\":\"/srv/golden-home/instances/beta/outbox\",\"target\":\"/opt/amap/lanes/outbox\",\"type\":\"bind\"}]}}",
+    "--env",
+    "AMAP_INBOX_DIR=/opt/amap/lanes/inbox",
+    "--env",
+    "AMAP_PEER_DIR=/opt/amap/lanes/peer",
+    "--env",
+    "AMAP_OUTBOX_DIR=/opt/amap/lanes/outbox",
+    "--env",
+    "AMAP_SELF_ADDRESS=beta@agents.example.org",
+    "--env",
+    "AMAP_SELF=beta@agents.example.org",
+    "--env",
+    "AMAP_ROSTER_DIR=/opt/amap/roster",
+    "--restart-policy",
+    "on-failure",
+    "--detach",
+    "--tty",
+    "--",
+    "/opt/amap/payload/amap-main",
+    "--mcp-config",
+    "/opt/amap/payload/mcp-servers.json",
+    "--append-system-prompt-file",
+    "/opt/amap/payload/INBOX-POLICY.md",
+    "--settings",
+    "/opt/amap/payload/claude-settings.json",
+    "--dangerously-skip-permissions"
+   ],
+   "policy_yaml": "# Sandbox policy rendered by amap-openshell. Re-render it; do not edit it.\nversion: 1\nfilesystem_policy:\n  include_workdir: false\n  read_only:\n    - \"/bin\"\n    - \"/usr\"\n    - \"/lib\"\n    - \"/proc\"\n    - \"/dev/urandom\"\n    - \"/etc\"\n    - \"/var/log\"\n    - \"/opt/amap/payload\"\n    - \"/opt/amap/roster\"\n    - \"/opt/amap/lanes/inbox\"\n    - \"/opt/amap/lanes/peer\"\n  read_write:\n    - \"/sandbox\"\n    - \"/tmp\"\n    - \"/dev/null\"\n    - \"/opt/amap/lanes/outbox\"\nlandlock:\n  compatibility: \"hard_requirement\"\nprocess:\n  run_as_user: \"1234\"\n  run_as_group: \"5678\"\n"
+  }
+ }
+}

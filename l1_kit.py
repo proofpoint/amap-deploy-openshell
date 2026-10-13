@@ -204,6 +204,7 @@ def payload_sources(connector: Path) -> Tuple[Source, ...]:
         Source(render.SETTINGS_NAME, own / render.SETTINGS_NAME, False),
         Source(SESSION_HOOK_NAME, own / SESSION_HOOK_NAME, True),
         Source(SEED_NAME, own / SEED_NAME, True),
+        Source("identity-check", own / "identity-check", True),
         Source(DELIVERY_NAME, bin_dir / DELIVERY_NAME, True),
         Source(DELIVERY_SUPPORT_NAME, bin_dir / DELIVERY_SUPPORT_NAME, False),
     ) + tuple(Source(f"{PAYLOAD_BIN_DIRNAME}/{n}", bin_dir / n, True)
