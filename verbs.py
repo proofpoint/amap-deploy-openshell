@@ -622,7 +622,8 @@ def registry_gate(h: HostArgs, fleet: Dict[str, Any], name: str,
                 lines.append(f"would register {name} again to redeliver its "
                              f"name.json ({binding.get('name_json')})")
                 return RegistryGate(None, lines, 0, cfg)
-            reg = _register(cfg, ws, name)
+            _remember(h.home, name)    # the attempt marker, before register
+            _register(cfg, ws, name)
             lines.append(f"registered {name} again: name.json redelivered")
     elif look.kind == host_registry.UNBOUND:
         listed = host_registry.list_bindings(cfg)

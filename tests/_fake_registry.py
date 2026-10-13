@@ -191,10 +191,18 @@ def safe_root() -> Path:
     ~/.cache/amap-openshell-tests. The caller removes it."""
     import tempfile
     import host_registry
-    base = Path(os.environ.get(SAFE_ROOT_VARIABLE)
-                or Path.home() / ".cache" / "amap-openshell-tests").resolve()
-    base.mkdir(parents=True, exist_ok=True)
-    os.chmod(base, 0o700)
+    supplied = os.environ.get(SAFE_ROOT_VARIABLE)
+    if supplied:
+        # The operator's directory: checked, never created or changed.
+        base = Path(supplied).resolve()
+        st = os.lstat(base)
+        if host_registry._writable_by_others(st.st_mode):
+            raise RuntimeError(f"${SAFE_ROOT_VARIABLE} {base} is group- or "
+                               f"world-writable")
+    else:
+        base = (Path.home() / ".cache" / "amap-openshell-tests").resolve()
+        base.mkdir(parents=True, exist_ok=True)
+        os.chmod(base, 0o700)
     bad = host_registry.writable_ancestor(str(base))
     if bad:
         raise RuntimeError(f"the safe test root {base} has a group- or "

@@ -321,3 +321,17 @@ def test_a_journal_without_a_snapshot_is_not_a_fresh_host(reg):
     code, out, err = reg.run("provision", "alpha", "--apply")
     assert code == 1 and "journal but no snapshot" in out + err
     assert "register" not in ops(reg.world)
+
+
+def test_a_bound_redelivery_records_the_attempt_before_registering(reg):
+    """A bound binding whose name.json is absent is registered again; the
+    attempt is recorded first, so a crash or an unknown answer still leaves
+    evidence on this host."""
+    reg.world.bind("default", "alpha")          # committed, no name.json
+    reg.world.faults({"register": {"error": "internal",
+                                   "committed": "unknown", "exit": 3}})
+    code, out, err = reg.run("provision", "alpha", "--apply")
+    assert code == 1 and "UNKNOWN" in out + err
+    record = json.loads((reg.home / "registry-members.json").read_text())
+    assert record == {"names": ["alpha"]}
+    assert not reg.creates()

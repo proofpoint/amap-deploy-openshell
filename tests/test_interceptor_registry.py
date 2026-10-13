@@ -250,3 +250,11 @@ def test_a_non_normalised_target_is_refused(host, target):
         if m["target"] == render.lane_target(render.LANE_OUTBOX):
             m["target"] = target
     refused(host, op, "normalized")
+
+
+def test_a_target_with_a_colon_is_refused(host):
+    op = host.operation()
+    for m in mounts_of(op):
+        if m["target"] == render.lane_target(render.LANE_OUTBOX):
+            m["target"] = "/opt/amap/a:b"
+    refused(host, op, "must not contain ':'")

@@ -36,6 +36,7 @@ import host_registry as hr
 
 pytestmark = pytest.mark.real_registry
 
+OVERLAY_VARIABLE = "AMAP_OPENSHELL_PRIVATE_OVERLAY"
 SCRATCH_MARKER = ".amap-openshell-registry-scratch"
 IDENTITY_ROOT_TOKEN = "@IDENTITY_ROOT@"
 OVERLAY_KEYS = set(hr.CONFIG_KEYS) | {"sha", "scratch", "host_config"}
@@ -61,33 +62,59 @@ def _scratch_problem(scratch) -> str:
     return ""
 
 
-@pytest.fixture(scope="session")
-def overlay():
-    """The session's prerequisites, before any registry command: the
-    overlay's shape, the pinned commit, and the scratch root."""
-    doc = hr.strict_loads(Path(os.environ["AMAP_OPENSHELL_PRIVATE_OVERLAY"])
-                          .read_bytes())
+class PrerequisiteError(Exception):
+    """The private run cannot start. Nothing has been asked of a registry."""
+
+
+def _check(doc) -> None:
     if not isinstance(doc, dict) or set(doc) != OVERLAY_KEYS:
-        pytest.exit("the private overlay is not the documented shape", 2)
+        raise PrerequisiteError("the private overlay is not the documented "
+                                "shape")
     hr.parse_config({k: doc[k] for k in hr.CONFIG_KEYS})
     for what, path, want_dir in (("python", doc["python"], False),
                                  ("checkout", doc["checkout"], True)):
         problem = hr.owner_problem(path, (os.getuid(), 0), what,
                                    want_dir=want_dir)
         if problem:
-            pytest.exit(problem, 2)
+            raise PrerequisiteError(problem)
     head = subprocess.run(["git", "-C", doc["checkout"], "rev-parse", "HEAD"],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, timeout=30)
     if head.returncode != 0 or head.stdout.strip() != doc["sha"]:
-        pytest.exit(f"the registry checkout is not at the pinned commit "
-                    f"{doc['sha']}", 2)
+        raise PrerequisiteError(f"the registry checkout is not at the pinned "
+                                f"commit {doc['sha']}")
     problem = _scratch_problem(doc["scratch"])
     if problem:
-        pytest.exit(problem, 2)
+        raise PrerequisiteError(problem)
     if not isinstance(doc["host_config"], dict) or \
             IDENTITY_ROOT_TOKEN not in json.dumps(doc["host_config"]):
-        pytest.exit("host_config has no identity-root placeholder", 2)
-    return doc
+        raise PrerequisiteError("host_config has no identity-root placeholder")
+
+
+def prerequisites(path) -> dict:
+    """The private overlay, once every prerequisite holds: its shape, its
+    config, the interpreter and checkout, the pinned commit, and the scratch
+    root. ANY failure, whatever raised it, is a PrerequisiteError naming the
+    cause. Nothing here runs a registry command or writes anything."""
+    try:
+        if not path:
+            raise PrerequisiteError(f"${OVERLAY_VARIABLE} is not set")
+        doc = hr.strict_loads(Path(path).read_bytes())
+        _check(doc)
+        return doc
+    except PrerequisiteError:
+        raise
+    except Exception as e:  # noqa: BLE001 - every failure must stop the run
+        raise PrerequisiteError(f"{type(e).__name__}: {e}") from None
+
+
+@pytest.fixture(scope="session")
+def overlay():
+    """The session's prerequisites, before any registry command. A failure
+    ends the session with exit status 2."""
+    try:
+        return prerequisites(os.environ.get(OVERLAY_VARIABLE))
+    except PrerequisiteError as e:
+        pytest.exit(f"the private run's prerequisites fail: {e}", 2)
 
 
 @pytest.fixture

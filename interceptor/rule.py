@@ -180,10 +180,12 @@ def _registry_checks(spec: Any, mounts: List[Any], name: str, home: str,
         if m.get("read_only", True) is not True:
             reasons.append("the identity directory must be bound read-only")
     # Targets are compared as text below, so each must be absolute and its
-    # own normal form: /opt/amap/./identity and lanes/../identity land on the
-    # identity target without spelling it.
+    # own normal form (/opt/amap/./identity and lanes/../identity land on the
+    # identity target without spelling it), and, like a source, free of ':',
+    # since a bind becomes a `-v source:target:ro` string.
     for i, m in enumerate(rows):
-        problem = render._path_problem(f"mounts[{i}].target", m.get("target"))
+        problem = render.host_path_problem(f"mounts[{i}].target",
+                                           m.get("target"))
         if problem:
             reasons.append(problem)
     for i, m in enumerate(rows):
