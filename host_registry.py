@@ -71,7 +71,8 @@ CONFIG_KEYS = PATH_KEYS + TOKEN_KEYS
 # The registry's own files that its writer uid owns. overlay.json is not one:
 # it is root-owned by design. host.json is the operator's data, checked for
 # being readable, never for its owner.
-REGISTRY_OWNED = ("journal.jsonl", "registry.json", "writer.lock")
+JOURNAL = "journal.jsonl"
+REGISTRY_OWNED = (JOURNAL, "registry.json", "writer.lock")
 HOST_CONFIG = "host.json"
 
 # The runner's isolation. `-I` would also drop the working directory from
@@ -147,12 +148,11 @@ def _writable_by_others(mode: int) -> bool:
 
 def writable_ancestor(path: str,
                       lstat: Callable = os.lstat) -> Optional[str]:
-    """The first ancestor of `path` that is group- or world-writable without
-    the sticky bit, or None. A sticky world-writable directory (/tmp) cannot
-    have another user's entry renamed or removed, so it is not counted."""
+    """The first ancestor of `path` that is group- or world-writable, or
+    None. The sticky bit earns no exemption: the trust rule names none."""
     for a in ancestors(path):
         st = lstat(a)
-        if _writable_by_others(st.st_mode) and not st.st_mode & stat.S_ISVTX:
+        if _writable_by_others(st.st_mode):
             return a
     return None
 
@@ -553,9 +553,12 @@ def classify_lookup(answer: Answer, op: str) -> Lookup:
             out.append(b)
         return Lookup(BOUND, bindings=tuple(out))
     if doc.get("ok") is False:
-        if set(doc) - {"ok", "error"}:
-            return Lookup(UNKNOWN, detail="a refusal with unexpected members")
         code, detail = _error(doc)
+        # An `interface` refusal lists the interfaces the registry speaks.
+        allowed = {"ok", "error"} | ({"interfaces"} if code == "interface"
+                                     else set())
+        if set(doc) - allowed:
+            return Lookup(UNKNOWN, detail="a refusal with unexpected members")
         return Lookup(classify_code(code), code=code, detail=detail)
     return Lookup(UNKNOWN, detail="the answer has no boolean ok")
 

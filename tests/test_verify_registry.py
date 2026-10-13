@@ -38,17 +38,17 @@ REGISTRY_CLAIMS = (
 
 
 @pytest.fixture
-def rworld(tmp_path, fake_bin, monkeypatch, capsys):
+def rworld(tmp_path, safe_tmp, fake_bin, monkeypatch, capsys):
     fake = _fake_openshell.Fake(tmp_path, fake_bin)
     for k, v in fake.env().items():
         monkeypatch.setenv(k, v)
-    op = Op(tmp_path, fake, capsys)
+    op = Op(safe_tmp, fake, capsys)
     template = json.loads((REPO / "examples" / "fleet.json").read_text())
     template["identity"] = "registry"
     path = tmp_path / "fleet-template.json"
     path.write_text(json.dumps(template))
     op.home.mkdir()
-    registry = fr.World(tmp_path.resolve() / "reghost", op.home.resolve())
+    registry = fr.World(safe_tmp / "reghost", op.home.resolve())
     code, out, err = op.run("install", "--apply", host=("--fleet", str(path)))
     assert code == 0, (out, err)
     registry.host_json({"domain": op.fleet()["fleet_domain"],
@@ -184,3 +184,15 @@ def test_a_registry_domain_mismatch_is_named(rworld):
         "identity_root": str(rworld.registry.identity_root)})
     code, out, _ = rworld.verify()
     assert "registry domain" in out
+
+
+def test_a_same_name_sandbox_does_not_hide_another_keys_binding(rworld):
+    """A binding of another workspace named like one of this workspace's
+    sandboxes is still asked about, and its logical_id differs from the one
+    show(workspace, name) answers, so it is not attributed here."""
+    rworld.registry.bind("other-workspace", "alpha")
+    code, out, _ = rworld.verify()
+    assert result(rworld, out, "every openshell identity without a sandbox "
+                               "here is attributable") == "FAIL"
+    assert result(rworld, out, "every registered identity of this workspace "
+                               "has a sandbox") == "PASS"

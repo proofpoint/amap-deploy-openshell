@@ -181,6 +181,30 @@ def write_checkout(checkout: Path) -> Path:
     return checkout
 
 
+SAFE_ROOT_VARIABLE = "AMAP_TEST_SAFE_ROOT"
+
+
+def safe_root() -> Path:
+    """A fresh directory with no group- or world-writable ancestor, which
+    host-registry.json's checks require of every path they inspect. /tmp is
+    world-writable, so it is made under $AMAP_TEST_SAFE_ROOT or
+    ~/.cache/amap-openshell-tests. The caller removes it."""
+    import tempfile
+    import host_registry
+    base = Path(os.environ.get(SAFE_ROOT_VARIABLE)
+                or Path.home() / ".cache" / "amap-openshell-tests").resolve()
+    base.mkdir(parents=True, exist_ok=True)
+    os.chmod(base, 0o700)
+    bad = host_registry.writable_ancestor(str(base))
+    if bad:
+        raise RuntimeError(f"the safe test root {base} has a group- or "
+                           f"world-writable ancestor {bad}; set "
+                           f"${SAFE_ROOT_VARIABLE} to a directory without one")
+    root = Path(tempfile.mkdtemp(dir=str(base))).resolve()
+    os.chmod(root, 0o755)
+    return root
+
+
 def real_python() -> str:
     """An interpreter that passes host-registry.json's own checks: owned by
     root or the caller, with no group- or world-writable ancestor. The fake

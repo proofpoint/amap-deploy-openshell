@@ -179,6 +179,13 @@ def _registry_checks(spec: Any, mounts: List[Any], name: str, home: str,
                            f"{render.IDENTITY_TARGET}, not {m.get('target')}")
         if m.get("read_only", True) is not True:
             reasons.append("the identity directory must be bound read-only")
+    # Targets are compared as text below, so each must be absolute and its
+    # own normal form: /opt/amap/./identity and lanes/../identity land on the
+    # identity target without spelling it.
+    for i, m in enumerate(rows):
+        problem = render._path_problem(f"mounts[{i}].target", m.get("target"))
+        if problem:
+            reasons.append(problem)
     for i, m in enumerate(rows):
         target = m.get("target")
         if m.get("source") == expected.identity_dir or \

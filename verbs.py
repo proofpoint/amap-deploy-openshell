@@ -47,6 +47,7 @@ import posixpath
 import socket
 import stat
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
@@ -437,36 +438,86 @@ def registry_config(h: HostArgs) -> host_registry.Config:
     return cfg
 
 
+REGISTERED_RECORD_KEYS = ("names",)
+MAX_REGISTERED_RECORD = 64 * 1024
+
+
+def _record_path(home: str) -> str:
+    return posixpath.join(home, REGISTERED_RECORD)
+
+
 def registered_names(home: str) -> Optional[List[str]]:
-    """The names provision has registered on this host, from
-    REGISTERED_RECORD: [] when it is absent, None when it cannot be read."""
-    path = posixpath.join(home, REGISTERED_RECORD)
+    """The names provision has attempted to register on this host, from
+    REGISTERED_RECORD: [] when it is absent, None when it cannot be trusted.
+    It must be a regular file (never followed through a symlink), owned by
+    the operator, not group- or world-writable, and exactly
+    {"names": [unique, sorted, valid names]}."""
+    path = _record_path(home)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | \
+        getattr(os, "O_NONBLOCK", 0)
     try:
-        doc = host_registry.strict_loads(Path(path).read_bytes())
+        fd = os.open(path, flags)
     except FileNotFoundError:
         return []
-    except (OSError, host_registry.Refused):
+    except OSError:
         return None
-    names = doc.get("names") if isinstance(doc, dict) else None
-    if not isinstance(names, list) or \
-            not all(isinstance(n, str) for n in names):
+    try:
+        st = os.fstat(fd)
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or st.st_size > MAX_REGISTERED_RECORD):
+            return None
+        data = os.read(fd, MAX_REGISTERED_RECORD + 1)
+    finally:
+        os.close(fd)
+    try:
+        doc = host_registry.strict_loads(data)
+    except host_registry.Refused:
+        return None
+    if not isinstance(doc, dict) or set(doc) != set(REGISTERED_RECORD_KEYS):
+        return None
+    names = doc["names"]
+    if not isinstance(names, list) or names != sorted(set(names)) or \
+            any(not isinstance(n, str) or membership.name_problem(n)
+                for n in names):
         return None
     return names
 
 
 def _remember(home: str, name: str) -> None:
+    """Adds `name` to REGISTERED_RECORD durably, BEFORE the registry is
+    asked to register it, so a crash after the registry commits still marks
+    this host as not fresh. A unique temp file, written and fsynced, renamed
+    into place, and the directory fsynced. Fails closed."""
     names = registered_names(home)
     if names is None:
-        raise VerbError(f"{posixpath.join(home, REGISTERED_RECORD)} cannot be "
-                        f"read; fix or remove it by hand")
+        raise VerbError(f"{_record_path(home)} cannot be trusted (it must be "
+                        f"the operator's, not group- or world-writable, and "
+                        f'exactly {{"names": [...]}}); fix it by hand. Nothing '
+                        f"was registered")
     if name in names:
         return
-    path = posixpath.join(home, REGISTERED_RECORD)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"names": sorted([*names, name])}, fh, sort_keys=True)
-        fh.write("\n")
-    os.replace(tmp, path)
+    data = (json.dumps({"names": sorted([*names, name])}, sort_keys=True)
+            + "\n").encode("utf-8")
+    fd, tmp = tempfile.mkstemp(prefix="." + REGISTERED_RECORD + ".",
+                               dir=home)
+    try:
+        os.fchmod(fd, 0o644)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        os.unlink(tmp)
+        raise
+    os.close(fd)
+    os.replace(tmp, _record_path(home))
+    dfd = os.open(home, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
 
 
 def _not_fresh(cfg: host_registry.Config, home: str) -> Optional[str]:
@@ -475,10 +526,12 @@ def _not_fresh(cfg: host_registry.Config, home: str) -> Optional[str]:
     here."""
     names = registered_names(home)
     if names is None:
-        return f"{REGISTERED_RECORD} cannot be read"
+        return f"{REGISTERED_RECORD} cannot be trusted"
     if names:
         return (f"{REGISTERED_RECORD} records {', '.join(names)} as already "
                 f"registered")
+    if os.path.lexists(posixpath.join(cfg.registry, host_registry.JOURNAL)):
+        return "the registry has a journal but no snapshot"
     held = host_registry.entries(cfg.identity_root)
     if held is None:
         return f"identity_root {cfg.identity_root} cannot be listed"
@@ -563,6 +616,14 @@ def registry_gate(h: HostArgs, fleet: Dict[str, Any], name: str,
         if probs:
             raise VerbError("\n".join(probs))
         lines.append(f"present registration {name} ({binding['logical_id']})")
+        if binding.get("name_json") != "current":
+            # Only register redelivers name.json; it is idempotent.
+            if not apply:
+                lines.append(f"would register {name} again to redeliver its "
+                             f"name.json ({binding.get('name_json')})")
+                return RegistryGate(None, lines, 0, cfg)
+            reg = _register(cfg, ws, name)
+            lines.append(f"registered {name} again: name.json redelivered")
     elif look.kind == host_registry.UNBOUND:
         listed = host_registry.list_bindings(cfg)
         if listed.kind != host_registry.BOUND:
@@ -589,6 +650,7 @@ def registry_gate(h: HostArgs, fleet: Dict[str, Any], name: str,
             lines.append(f"would register {name} with the host registry; the "
                          f"create command is rendered after registration")
             return RegistryGate(None, lines, 0, cfg)
+        _remember(h.home, name)        # the attempt marker, before register
         reg = _register(cfg, ws, name)
         lines.append(f"registered {name} ({reg.binding['logical_id']})")
     look = host_registry.show(cfg, ws, name)

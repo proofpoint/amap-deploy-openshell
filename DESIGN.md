@@ -372,7 +372,7 @@ members and never on the exit status:
 | Answer | Before the first register | After it |
 |---|---|---|
 | `not_found` | unbound: the pre-check, then register | refuse |
-| `registry_absent` | a fresh host only when `identity_root` is empty and `registry-members.json` records nothing; otherwise UNKNOWN | UNKNOWN |
+| `registry_absent` | a fresh host only when `identity_root` is empty, the registry has no journal, and `registry-members.json` records nothing; otherwise UNKNOWN | UNKNOWN |
 | `unreadable`, `invalid` | UNKNOWN: stop, never empty | UNKNOWN |
 | `config_absent`, `instances_dir_absent`, `adapter_not_configured`, `interface` | broken config: fail closed | refuse |
 | `bad_request` | this repository's defect | the same |
@@ -385,7 +385,13 @@ members and never on the exit status:
 - UNKNOWN (`committed: "unknown"`, or no usable answer);
 - REFUSED.
 
-UNDELIVERED and UNKNOWN are retried once, and `register` is idempotent.
+UNDELIVERED and UNKNOWN are retried once, and `register` is idempotent. `provision` adds the name to `registry-members.json` before it
+asks the registry to register it, so a crash after the registry commits still
+marks the host as not fresh. The record is written durably (a unique
+temporary file, fsynced, renamed, and the directory fsynced) and read only
+when it is the operator's, not group- or world-writable, and exactly
+`{"names": [...]}`. A binding whose `name.json` is not current is registered
+again on the next `provision`: only `register` redelivers it.
 
 **provision.** With the switch on:
 

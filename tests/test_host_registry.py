@@ -22,8 +22,8 @@ REPO = Path(__file__).absolute().parents[1]
 
 
 @pytest.fixture
-def world(tmp_path):
-    root = tmp_path.resolve()
+def world(safe_tmp):
+    root = safe_tmp
     home = root / "home"
     home.mkdir()
     return fr.World(root, home)
@@ -383,3 +383,23 @@ def test_no_public_file_names_a_private_identifier():
                  "payload/amap-main"):
         text = (REPO / path).read_text(encoding="utf-8")
         assert "example-registry" not in text, path
+
+
+def test_a_sticky_world_writable_ancestor_is_refused_too(world):
+    parent = world.root / "sticky"
+    parent.mkdir()
+    code = fr.write_checkout(parent / "code")
+    os.chmod(parent, 0o1777)
+    world.write_config(dict(world.config, checkout=str(code)))
+    with pytest.raises(hr.ConfigError, match="writable ancestor"):
+        cfg_of(world)
+
+
+def test_exit_3_without_committed_is_unknown(world):
+    world.faults({"register": {"error": "internal", "exit": 3}})
+    assert hr.register(cfg_of(world), "default", "alpha").outcome == hr.UNKNOWN
+
+
+def test_an_interface_refusal_is_broken_config(world):
+    cfg = cfg_of(world)._replace(interface="another/1")
+    assert hr.show(cfg, "default", "alpha").kind == hr.BROKEN

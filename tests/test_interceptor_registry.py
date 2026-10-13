@@ -71,8 +71,8 @@ def mounts_of(op):
 
 
 @pytest.fixture
-def host(tmp_path):
-    return Host(tmp_path)
+def host(safe_tmp):
+    return Host(safe_tmp)
 
 
 def refused(host, op, needle):
@@ -237,3 +237,16 @@ def test_the_legacy_fleet_never_asks_the_registry(host):
     check_create(op, str(host.home), fleet,
                  show=lambda *a: asked.append(a) or None)
     assert asked == []
+
+
+@pytest.mark.parametrize("target", ["/opt/amap/./identity",
+                                    "/opt/amap/lanes/../identity",
+                                    "/opt/amap/x/../identity/sub"])
+def test_a_non_normalised_target_is_refused(host, target):
+    """Targets are compared as text, so a spelling that lands on the identity
+    target must be refused for its spelling."""
+    op = host.operation()
+    for m in mounts_of(op):
+        if m["target"] == render.lane_target(render.LANE_OUTBOX):
+            m["target"] = target
+    refused(host, op, "normalized")

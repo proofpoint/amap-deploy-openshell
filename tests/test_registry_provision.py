@@ -17,10 +17,16 @@ import pytest
 import _fake_registry as fr
 import host_registry as hr
 import render
-from test_verbs import Op, fake, op  # noqa: F401  (fixtures)
+from test_verbs import Op, fake  # noqa: F401  (fixtures)
 
 REPO = Path(__file__).absolute().parents[1]
 IC = hr.identity_check
+
+
+@pytest.fixture
+def op(safe_tmp, fake, capsys):
+    """An Op whose home has no group- or world-writable ancestor."""
+    return Op(safe_tmp, fake, capsys)
 
 
 @pytest.fixture
@@ -31,7 +37,7 @@ def reg(tmp_path, op):
     path = tmp_path / "fleet-template.json"
     path.write_text(json.dumps(template))
     op.home.mkdir()
-    world = fr.World(tmp_path.resolve() / "reghost", op.home.resolve(),
+    world = fr.World(op.home.parent / "reghost", op.home.resolve(),
                      domain="placeholder.example.org")
     op.world = world
     op.template = str(path)
@@ -256,9 +262,62 @@ def test_install_creates_the_identity_root(tmp_path, op):
     path = tmp_path / "t.json"
     path.write_text(json.dumps(template))
     op.home.mkdir()
-    world = fr.World(tmp_path.resolve() / "r", op.home.resolve(),
+    world = fr.World(op.home.parent / "r", op.home.resolve(),
                      make_identity_root=False)
     code, out, err = op.run("install", "--apply", host=("--fleet", str(path)))
     assert code == 0, (out, err)
     assert world.identity_root.is_dir()
     assert oct(world.identity_root.stat().st_mode & 0o777) == "0o755"
+
+
+# --- redelivery, the attempt marker and the record ----------------------------
+
+def test_an_undelivered_registration_is_redelivered_on_rerun(reg):
+    """Two undelivered attempts leave a committed binding with no name.json.
+    Only register redelivers, so a rerun must register again rather than
+    refuse "not current" forever."""
+    reg.world.faults({"register": {"error": "delivery_failed",
+                                   "committed": True}})
+    code, _out, _err = reg.run("provision", "alpha", "--apply")
+    assert code == 1 and not reg.creates()
+    reg.world.faults({})
+    out = reg.ok("provision", "alpha", "--apply")
+    assert "name.json redelivered" in out
+    assert reg.creates()
+    assert len(reg.world.state()["bindings"]) == 1
+
+
+def test_the_attempt_is_recorded_before_the_registry_is_asked(reg):
+    reg.world.faults({"register": {"error": "internal",
+                                   "committed": "unknown", "exit": 3}})
+    code, _out, _err = reg.run("provision", "alpha", "--apply")
+    assert code == 1
+    record = json.loads((reg.home / "registry-members.json").read_text())
+    assert record == {"names": ["alpha"]}
+
+
+@pytest.mark.parametrize("what", ["symlink", "group-writable", "extra member",
+                                  "duplicate name", "unsorted", "bad name"])
+def test_an_untrusted_record_fails_closed(reg, what):
+    path = reg.home / "registry-members.json"
+    text = {"extra member": '{"names": [], "more": 1}',
+            "duplicate name": '{"names": ["alpha", "alpha"]}',
+            "unsorted": '{"names": ["beta", "alpha"]}',
+            "bad name": '{"names": ["Not_A_Name"]}'}.get(what,
+                                                         '{"names": []}')
+    if what == "symlink":
+        real = reg.home.parent / "elsewhere.json"
+        real.write_text(text)
+        os.symlink(real, path)
+    else:
+        path.write_text(text)
+        os.chmod(path, 0o664 if what == "group-writable" else 0o644)
+    code, out, err = reg.run("provision", "alpha", "--apply")
+    assert code == 1 and "register" not in ops(reg.world)
+
+
+def test_a_journal_without_a_snapshot_is_not_a_fresh_host(reg):
+    (reg.world.registry / "journal.jsonl").write_text("")
+    code, out, err = reg.run("provision", "alpha", "--apply")
+    assert code == 1 and "journal but no snapshot" in out + err
+    assert "register" not in ops(reg.world)

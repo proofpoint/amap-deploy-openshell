@@ -734,19 +734,24 @@ def _f_unattributed(ctx):
         return (_unresolved(f"the host registry's list: {listed.kind} "
                             f"{listed.code or ''} {listed.detail}"),
                 "the host registry's list")
-    have = set(ctx.value("listed_names"))
+    have = set(ctx.value("listed_names"))     # this workspace's sandboxes
     orphans: List[str] = []
     strangers: List[str] = []
     for b in listed.bindings:
         if b.get("adapter") != host_registry.ADAPTER or \
-                b.get("state") != "active" or b.get("name") in have:
+                b.get("state") != "active":
             continue
+        # Every active binding is asked about, whether or not a sandbox of
+        # its name exists: a same-name sandbox must not hide another key's
+        # binding. Only show(workspace, name) answering with this very
+        # logical_id makes a binding this workspace's.
         look = host_registry.show(cfg, ws, b["name"])
-        if look.kind == host_registry.BOUND and \
-                look.binding["logical_id"] == b["logical_id"]:
-            orphans.append(f"{b['name']} ({b['logical_id']})")
-        else:
+        mine = (look.kind == host_registry.BOUND
+                and look.binding["logical_id"] == b["logical_id"])
+        if not mine:
             strangers.append(f"{b['name']} ({b['logical_id']})")
+        elif b["name"] not in have:
+            orphans.append(f"{b['name']} ({b['logical_id']})")
     return ({"orphans": orphans, "strangers": strangers},
             "the host registry's list, each binding without a sandbox "
             "confirmed by show in the workspace")
