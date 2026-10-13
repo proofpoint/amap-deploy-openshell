@@ -182,7 +182,22 @@ def write_checkout(checkout: Path) -> Path:
 
 
 def real_python() -> str:
-    return os.path.realpath(sys.executable)
+    """An interpreter that passes host-registry.json's own checks: owned by
+    root or the caller, with no group- or world-writable ancestor. The fake
+    is standard library only, so any Python 3 runs it. A CI runner's own
+    interpreter may sit under a world-writable directory, which the checks
+    rightly refuse, so the system one is the fallback."""
+    import host_registry
+    tried = []
+    for cand in (os.path.realpath(sys.executable),
+                 os.path.realpath("/usr/bin/python3")):
+        problem = host_registry.owner_problem(cand, (os.getuid(), 0), "python",
+                                              want_dir=False)
+        if problem is None:
+            return cand
+        tried.append(problem)
+    raise RuntimeError("no interpreter passes the config's checks: "
+                       + "; ".join(tried))
 
 
 class World:
