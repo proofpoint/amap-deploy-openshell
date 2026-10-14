@@ -238,10 +238,10 @@ def test_a_fresh_vm_goes_all_the_way_to_the_probe(vm) -> None:
     assert _toml_settings(vm["toml"].read_text()) == _toml_settings(
         GUEST.read_text().split("GATEWAY_CONFIG='", 1)[1].split("\n'\n", 1)[0])
     assert "openshell gateway add https://127.0.0.1:17670 --local --name openshell" in calls
-    assert "openshell sandbox create --name g3-probe --no-keep -- true" in calls
+    assert "openshell sandbox create --name lab-probe --no-keep -- true" in calls
     linger = [i for i, c in enumerate(calls) if c.startswith("sudo loginctl enable-linger ")]
-    assert linger and linger[0] < calls.index("openshell sandbox create --name g3-probe --no-keep -- true")
-    assert "G3 is met" in r.stdout and "g3-openshell-0-1-2" in r.stdout
+    assert linger and linger[0] < calls.index("openshell sandbox create --name lab-probe --no-keep -- true")
+    assert "G3 is met" in r.stdout and "lab-openshell-0-1-2" in r.stdout
 
 
 def test_a_configured_vm_is_left_as_it_is(vm) -> None:
@@ -388,7 +388,7 @@ def test_apply_orders_the_interceptor_unit_before_the_gateway_and_writes_the_fra
              at("systemctl --user daemon-reload"), at(f"systemctl --user enable {UNIT_NAME}"),
              at(RESTART_INTERCEPTOR), gateway_restarts[-1]]
     assert order == sorted(order) and len(set(order)) == len(order), calls
-    assert at("openshell sandbox create --name g3-probe --no-keep -- true") < at(RESTART_INTERCEPTOR)
+    assert at("openshell sandbox create --name lab-probe --no-keep -- true") < at(RESTART_INTERCEPTOR)
     fragment = wire.gateway_fragment(home)
     text = toml.read_text()
     assert fragment in text

@@ -81,7 +81,7 @@ MIN_KERNEL="6.2"
 MIN_DOCKER="28.0"
 GATEWAY_URL="https://127.0.0.1:17670"
 GATEWAY_NAME="openshell"
-PROBE_NAME="g3-probe"
+PROBE_NAME="lab-probe"
 INSTALLER_URL="https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh"
 
 # The gateway configuration. Its settings must stay identical to the TOML
@@ -425,7 +425,7 @@ EOF
 Next:
   1. On the Proxmox host, snapshot this point (snapshot names allow letters,
      digits, - and _ only):
-       qm snapshot <vmid> g3-openshell-${ver//./-}
+       qm snapshot <vmid> lab-openshell-${ver//./-}
   2. Follow docs/L1-RUNBOOK.md from step 0.
 EOF
     printf '%s' "$NEXT_3"
