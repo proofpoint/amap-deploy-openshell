@@ -33,7 +33,7 @@ required:
   --ssh-key FILE      public key(s) allowed to log in (authorized_keys format)
 
 options (defaults in brackets):
-  --name NAME         VM name [openshell-g3]
+  --name NAME         VM name [openshell-lab]
   --user NAME         login user created by cloud-init [amap]
   --storage ID        storage for the disk and the cloud-init drive [local-lvm]
   --bridge NAME       network bridge [vmbr0]
@@ -53,7 +53,7 @@ PROG="$(basename "$0")"
 die() { echo "$PROG: $*" >&2; exit 2; }
 
 VMID="" SSH_KEY="" APPLY=0
-NAME="openshell-g3" CI_USER="amap" STORAGE="local-lvm" BRIDGE="vmbr0"
+NAME="openshell-lab" CI_USER="amap" STORAGE="local-lvm" BRIDGE="vmbr0"
 IP="dhcp" GW="" CORES=4 CPU="host" MEMORY=8192 DISK_GB=64
 CACHE_DIR="/var/lib/vz/template/cache"
 IMAGE_BASE="https://cloud-images.ubuntu.com/noble/current"

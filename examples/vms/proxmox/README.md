@@ -45,7 +45,7 @@ rerun: each step checks what is already there. It never overwrites a
 ./provision-guest.sh --apply      # ends with "G3 is met" and the versions
 
 # 3. On the Proxmox host: snapshot the working G3 host.
-qm snapshot <vmid> g3-openshell-0-1-2
+qm snapshot <vmid> lab-openshell-0-1-2
 ```
 
 For a snapshot before OpenShell as well, run `provision-guest.sh --apply
