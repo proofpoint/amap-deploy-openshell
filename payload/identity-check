@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""payload/identity-check: decides whether this sandbox's identity directory
+holds the identity the host rendered, and prints the address when it does.
+
+`payload/amap-main` runs it, with `python3 -I`, when the host registry is in
+use (DESIGN.md D27). The host side (`verify`, through `host_registry`) loads
+this same file by path, so the sandbox and the host apply one validator.
+
+The inputs are the environment the host set with `--env`:
+
+  AMAP_IDENTITY_DIR         must be exactly /opt/amap/identity, the read-only
+                            directory bind (never a single-file bind)
+  AMAP_IDENTITY             name.json's expected `schema` value
+  AMAP_IDENTITY_NAME        the expected `name`
+  AMAP_IDENTITY_ADDRESS     the expected `address`
+  AMAP_IDENTITY_LOGICAL_ID  the expected `logical_id`
+  AMAP_IDENTITY_EPOCH       the expected `epoch`, a decimal integer
+
+name.json must be exactly the five-member document {schema, name, address,
+logical_id, epoch}: no member missing, none extra, none duplicated, each of the
+right type, and each equal to its expected value. On success the address is
+the only output, on stdout, and the exit status is 0. On any failure, one line
+naming the failed check goes to stderr (never the file's contents) and the
+exit status is 1. The caller holds; it never falls back to another address.
+
+Standard library only. Python 3.9 compatible.
+"""
+
+import json
+import os
+import re
+import stat
+import sys
+
+IDENTITY_TARGET = "/opt/amap/identity"
+NAME_JSON = "name.json"
+MAX_NAME_JSON = 64 * 1024
+NAME_JSON_KEYS = ("schema", "name", "address", "logical_id", "epoch")
+STRING_KEYS = ("schema", "name", "address", "logical_id")
+
+ENV_DIR = "AMAP_IDENTITY_DIR"
+ENV_SCHEMA = "AMAP_IDENTITY"
+ENV_NAME = "AMAP_IDENTITY_NAME"
+ENV_ADDRESS = "AMAP_IDENTITY_ADDRESS"
+ENV_LOGICAL_ID = "AMAP_IDENTITY_LOGICAL_ID"
+ENV_EPOCH = "AMAP_IDENTITY_EPOCH"
+# The order the host renders them in, and the order a missing one is reported.
+ENV_KEYS = (ENV_DIR, ENV_SCHEMA, ENV_NAME, ENV_ADDRESS, ENV_LOGICAL_ID,
+            ENV_EPOCH)
+
+LOGICAL_ID = re.compile(r"[0-9a-f]{32}\Z")
+EPOCH_TEXT = re.compile(r"[1-9][0-9]{0,17}\Z")
+
+
+class Refused(ValueError):
+    """The identity cannot be accepted. The message names the failed check."""
+
+
+def _no_duplicates(pairs):
+    seen = {}
+    for key, value in pairs:
+        if key in seen:
+            raise Refused(f"duplicate member {key!r}")
+        seen[key] = value
+    return seen
+
+
+def _no_constant(name):
+    raise Refused(f"non-finite number {name}")
+
+
+def strict_loads(data):
+    """JSON with a duplicate member name anywhere refused, and NaN and the
+    infinities refused, before ordinary parsing could collapse or accept
+    them. `data` is bytes (decoded as UTF-8) or str."""
+    if isinstance(data, bytes):
+        try:
+            data = data.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise Refused(f"not UTF-8: {e.reason}") from None
+    try:
+        return json.loads(data, object_pairs_hook=_no_duplicates,
+                          parse_constant=_no_constant)
+    except Refused:
+        raise
+    except ValueError as e:
+        raise Refused(f"not JSON: {e}") from None
+
+
+def is_epoch(value):
+    """An integer that is not a bool, and at least 1."""
+    return type(value) is int and value >= 1
+
+
+def expected_from_env(env):
+    """The expected identity, from the environment. Every variable is
+    required, and AMAP_IDENTITY_DIR must be exactly the identity target."""
+    for key in ENV_KEYS:
+        if not env.get(key):
+            raise Refused(f"{key} is not set")
+    if env[ENV_DIR] != IDENTITY_TARGET:
+        raise Refused(f"{ENV_DIR} is not {IDENTITY_TARGET}")
+    if not EPOCH_TEXT.match(env[ENV_EPOCH]):
+        raise Refused(f"{ENV_EPOCH} is not a positive decimal integer")
+    return {"schema": env[ENV_SCHEMA], "name": env[ENV_NAME],
+            "address": env[ENV_ADDRESS], "logical_id": env[ENV_LOGICAL_ID],
+            "epoch": int(env[ENV_EPOCH])}
+
+
+def check_document(doc, expected):
+    """Every reason `doc` is not the expected name.json. Empty means it is.
+    `expected` holds the five members, `epoch` as an int."""
+    if not isinstance(doc, dict):
+        return ["name.json is not a JSON object"]
+    reasons = []
+    missing = [k for k in NAME_JSON_KEYS if k not in doc]
+    extra = sorted(k for k in doc if k not in NAME_JSON_KEYS)
+    if missing:
+        reasons.append(f"name.json lacks {', '.join(missing)}")
+    if extra:
+        reasons.append(f"name.json has extra member(s) {', '.join(extra)}")
+    # Values are compared only for members of the right type, so a wrong
+    # type is reported once, as a type.
+    typed = set()
+    for key in STRING_KEYS:
+        if key in doc:
+            if isinstance(doc[key], str):
+                typed.add(key)
+            else:
+                reasons.append(f"name.json {key} is not a string")
+    if "epoch" in doc:
+        if is_epoch(doc["epoch"]):
+            typed.add("epoch")
+        else:
+            reasons.append("name.json epoch is not an integer of at least 1")
+    if "logical_id" in typed and not LOGICAL_ID.match(doc["logical_id"]):
+        typed.discard("logical_id")
+        reasons.append("name.json logical_id is not 32 lower-case hex")
+    if {"address", "name"} <= typed:
+        local, at, domain = doc["address"].partition("@")
+        if not at or not domain or local != doc["name"]:
+            reasons.append("name.json address is not name@domain")
+    if "address" in typed and doc["address"].rpartition("@")[2] != \
+            expected["address"].rpartition("@")[2]:
+        reasons.append("name.json address domain is not the expected domain")
+    for key in NAME_JSON_KEYS:
+        if key in typed and doc[key] != expected[key]:
+            reasons.append(f"name.json {key} is not the expected value")
+    return reasons
+
+
+def read_name_json(directory):
+    """name.json's bytes: a regular file, opened without following a
+    symlink, of at most MAX_NAME_JSON bytes."""
+    path = os.path.join(directory, NAME_JSON)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | \
+        getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        raise Refused("name.json is absent") from None
+    except OSError as e:
+        raise Refused(f"name.json cannot be opened: {e.strerror}") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise Refused("name.json is not a regular file")
+        if st.st_size > MAX_NAME_JSON:
+            raise Refused("name.json is too large")
+        data = os.read(fd, MAX_NAME_JSON + 1)
+    finally:
+        os.close(fd)
+    if len(data) > MAX_NAME_JSON:
+        raise Refused("name.json is too large")
+    return data
+
+
+def address_for(env, directory=None):
+    """The address, when the identity directory holds exactly the identity
+    the host rendered. Raises Refused otherwise. `directory` replaces the
+    identity target for tests only; the environment is still required to
+    name the target exactly."""
+    expected = expected_from_env(env)
+    data = read_name_json(directory or env[ENV_DIR])
+    reasons = check_document(strict_loads(data), expected)
+    if reasons:
+        raise Refused(reasons[0])
+    return expected["address"]
+
+
+def main(argv=None):
+    try:
+        address = address_for(os.environ)
+    except Refused as e:
+        print(f"identity-check: {e}", file=sys.stderr)
+        return 1
+    print(address)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

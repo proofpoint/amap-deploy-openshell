@@ -86,6 +86,7 @@ from typing import (Any, Callable, Dict, Iterator, List, Mapping, NamedTuple,
                     Optional, Sequence, Tuple)
 
 import gateway
+import host_registry
 import l1_kit
 import l1_run
 import membership
@@ -168,6 +169,30 @@ loader.exec_module(lister)
 table = lister.process_table(lister.PROC)
 print(sum(1 for pid in sorted(table)
           if lister.runs(lister.PROC, table, pid, name)))
+'''
+
+
+# D27: the identity variables of each running process named argv[1], read
+# from /proc. The sandbox's processes run under one uid, so each environ is
+# readable to the probe.
+ENV_PROBE = PROBE_MARK + "env-probe\n" + '''import json, os, sys
+name, keys = sys.argv[1], sys.argv[2:]
+found = []
+for pid in sorted(p for p in os.listdir("/proc") if p.isdigit()):
+    try:
+        with open("/proc/%s/cmdline" % pid, "rb") as fh:
+            argv = fh.read().split(b"\\0")
+        if not any(os.path.basename(a.decode("utf-8", "replace")) == name
+                   for a in argv[:2]):
+            continue
+        with open("/proc/%s/environ" % pid, "rb") as fh:
+            env = fh.read().split(b"\\0")
+    except OSError:
+        continue
+    pairs = dict(e.decode("utf-8", "replace").split("=", 1)
+                 for e in env if b"=" in e)
+    found.append({k: pairs.get(k) for k in keys})
+print(json.dumps(found))
 '''
 
 
@@ -460,7 +485,276 @@ def _f_gateway_reading(ctx):
 
 
 def _rendered_mount_rows(ctx, name):
-    return render.mount_table(ctx.value("host"), name)
+    """The rows the create command was built from: the mount table, and with
+    the host registry (D27) the member's identity directory, which only the
+    registry's binding can name."""
+    rows = render.mount_table(ctx.value("host"), name)
+    fleet = ctx.value("fleet")
+    if not isinstance(fleet, Unresolved) and policy.uses_registry(fleet):
+        b = ctx.of("registry_bindings", name).value
+        if not isinstance(b, dict):
+            raise render.RenderError(
+                f"{name}'s identity directory cannot be rendered: "
+                f"{getattr(b, 'reason', 'it has no host registry binding')}")
+        rows = rows + (render.identity_row(b["identity_dir"]),)
+    return rows
+
+
+# --- the host registry (D27) -------------------------------------------------
+
+def _registry_off(ctx) -> Optional[Tuple[Any, str]]:
+    gone = _inherit(ctx, "fleet")
+    if gone:
+        return gone
+    if not policy.uses_registry(ctx.value("fleet")):
+        return (_unresolved("the fleet does not use the host registry"),
+                "fleet.json")
+    return None
+
+
+def _f_registry(ctx):
+    off = _registry_off(ctx)
+    if off:
+        return off
+    home = ctx.opts.home
+    try:
+        return (host_registry.load_config(home, keep_out_of=(
+            render.payload_dir(home), render.roster_dir(home),
+            render.instances_dir(home))), host_registry.CONFIG_NAME)
+    except host_registry.ConfigError as e:
+        return _unresolved(str(e)), host_registry.CONFIG_NAME
+
+
+def _f_registry_layout(ctx):
+    gone = _inherit(ctx, "registry")
+    if gone:
+        return gone
+    cfg = ctx.value("registry")
+    return (host_registry.ownership_problems(cfg)
+            + host_registry.layout_problems(cfg,
+                                            render.instances_dir(ctx.opts.home)),
+            "the owners and modes of the registry's files and the identity "
+            "root, and the identity root's place by filesystem identity")
+
+
+def _f_registry_speaks(ctx):
+    gone = _inherit(ctx, "registry")
+    if gone:
+        return gone
+    speaks, why = host_registry.version(ctx.value("registry"))
+    if speaks is None:
+        return _unresolved(why), "the host registry's version"
+    return speaks, "the host registry's version, against the configured interface"
+
+
+def _f_registry_bindings(ctx):
+    """{member: binding, Absent (not registered), or Unresolved}, by the
+    status table's after-registration column: an empty registry here is an
+    answer nobody can use."""
+    gone = _inherit(ctx, "registry", "registry_speaks", "fleet_members",
+                    "workspace")
+    if gone:
+        return gone
+    if ctx.value("registry_speaks") is not True:
+        return (_unresolved("the host registry does not list the configured "
+                            "interface, so no answer of its can be read"),
+                "the host registry's version")
+    cfg, ws = ctx.value("registry"), ctx.value("workspace")
+    out: Dict[str, Any] = {}
+    for n in ctx.value("fleet_members"):
+        look = host_registry.show(cfg, ws, n)
+        if look.kind == host_registry.BOUND:
+            out[n] = look.binding
+        elif look.kind == host_registry.UNBOUND:
+            out[n] = Absent()
+        else:
+            out[n] = _unresolved(f"the host registry's show for {n}: "
+                                 f"{look.kind} {look.code or ''} "
+                                 f"{look.detail}")
+    return out, "the host registry's show for each member"
+
+
+def _member_registration(ctx, cfg, name: str, b: Any) -> Any:
+    if isinstance(b, Unresolved):
+        return b
+    if isinstance(b, Absent):
+        return [f"{name} has no host registry binding: it predates the "
+                f"registry, or was never provisioned with it"]
+    probs = verbs.interim_problems(b, name, ctx.value("fleet"))
+    if b["state"] != "active":
+        probs.append(f"{name}'s binding is {b['state']}")
+    if b.get("name_json") != "current":
+        probs.append(f"the host registry reports {name}'s name.json as "
+                     f"{b.get('name_json')}")
+    problem = host_registry.identity_dir_problem(cfg, b)
+    if problem:
+        probs.append(problem)
+    else:
+        probs += host_registry.name_json_problems(
+            b["identity_dir"], host_registry.expected_of(cfg, b))
+    return probs
+
+
+def _f_registration_problems(ctx):
+    gone = _inherit(ctx, "registry", "registry_bindings")
+    if gone:
+        return gone
+    cfg = ctx.value("registry")
+    return ({n: _member_registration(ctx, cfg, n, b)
+             for n, b in ctx.value("registry_bindings").items()},
+            "each member's binding against fleet.json, and its name.json by "
+            "the sandbox's own validator")
+
+
+def _identity_entries(b: Any) -> Any:
+    if not isinstance(b, dict) or "identity_dir" not in b:
+        return _unresolved("no identity directory to list")
+    held = host_registry.entries(b["identity_dir"])
+    if held is None:
+        return _unresolved(f"{b['identity_dir']} cannot be listed")
+    return [e for e in held if e != host_registry.NAME_JSON]
+
+
+def _f_identity_extras(ctx):
+    gone = _inherit(ctx, "registry_bindings")
+    if gone:
+        return gone
+    return ({n: _identity_entries(b)
+             for n, b in ctx.value("registry_bindings").items()},
+            "each identity directory's entries other than name.json")
+
+
+def _identity_mount(ctx, cfg, name: str, b: Any, rows: Any) -> Any:
+    """Every reason the live identity mount is not the rendered one: a
+    directory bind of exactly the binding's identity_dir at the identity
+    target, read-only, with no overlapping target, and no source touching
+    the registry directory."""
+    if isinstance(rows, Unresolved):
+        return rows
+    if not isinstance(b, dict):
+        return _unresolved(f"{name} has no usable binding")
+    probs: List[str] = []
+    want = _real(b["identity_dir"])
+    got = rows.get(render.IDENTITY_TARGET)
+    if got is None:
+        probs.append(f"{name} has no identity mount: its sandbox predates its "
+                     f"registration")
+    else:
+        source, rw = got
+        if source != want:
+            probs.append(f"the identity mount's source is {source}, not {want}")
+        if not os.path.isdir(source) or os.path.islink(source):
+            probs.append(f"the identity mount's source {source} is not a "
+                         f"directory: a single-file bind")
+        if rw:
+            probs.append("the identity mount is writable")
+    for dest, (source, _rw) in sorted(rows.items()):
+        if dest != render.IDENTITY_TARGET and \
+                render._overlap(dest, render.IDENTITY_TARGET):
+            probs.append(f"{dest} overlaps the identity target")
+        try:
+            rel = host_registry.relation(source, cfg.registry)
+        except (OSError, ValueError) as e:
+            probs.append(f"{source} cannot be compared with the registry "
+                         f"directory: {e}")
+            continue
+        if rel != "disjoint":
+            probs.append(f"{dest} mounts {source}, which touches the host "
+                         f"registry's directory")
+    return probs
+
+
+def _f_identity_mounts(ctx):
+    gone = _inherit(ctx, "registry", "registry_bindings", "actual_mounts")
+    if gone:
+        return gone
+    cfg, bindings = ctx.value("registry"), ctx.value("registry_bindings")
+    return ({n: _identity_mount(ctx, cfg, n, bindings.get(n), rows)
+             for n, rows in ctx.value("actual_mounts").items()},
+            "docker's bind mounts, against the binding's identity directory")
+
+
+IDENTITY_PROBE_KEYS = ("AMAP_DELIVERY_SELF", render.PEER_SELF_ENV,
+                       *host_registry.identity_check.ENV_KEYS)
+
+
+def _running_identity(ctx, name: str, b: Any) -> Any:
+    if not isinstance(b, dict):
+        return _unresolved(f"{name} has no usable binding")
+    doc = _member_doc(ctx, name)
+    if isinstance(doc, Unresolved):
+        return doc
+    r = ctx.probe.exec_in(name, ["python3", "-c", ENV_PROBE,
+                                 l1_kit.DELIVERY_NAME, *IDENTITY_PROBE_KEYS])
+    if r.code != 0:
+        return _unresolved(f"`sandbox exec` in {name} failed: "
+                           f"{openshell_cli.first_line(r.stderr or r.stdout)}")
+    try:
+        found = json.loads(_answer_line(r.stdout))
+    except ValueError:
+        return _unresolved(f"the identity probe in {name} printed no JSON")
+    if not isinstance(found, list) or not found:
+        return _unresolved(f"no {l1_kit.DELIVERY_NAME} process in {name} to "
+                           f"read")
+    ic = host_registry.identity_check
+    want = {"AMAP_DELIVERY_SELF": b["address"], render.PEER_SELF_ENV: b["address"],
+            ic.ENV_NAME: b["name"], ic.ENV_ADDRESS: b["address"],
+            ic.ENV_LOGICAL_ID: b["logical_id"], ic.ENV_EPOCH: str(b["epoch"])}
+    probs = []
+    for env in found:
+        for key, value in want.items():
+            if not isinstance(env, dict) or env.get(key) != value:
+                probs.append(f"the running {l1_kit.DELIVERY_NAME}'s {key} is "
+                             f"not the binding's")
+    return sorted(set(probs))
+
+
+def _f_running_identity(ctx):
+    gone = _inherit(ctx, "registry_bindings", "fleet_members", "sandbox_docs")
+    if gone:
+        return gone
+    bindings = ctx.value("registry_bindings")
+    return ({n: _running_identity(ctx, n, bindings.get(n))
+             for n in ctx.value("fleet_members")},
+            "the identity variables of the running delivery daemon, inside "
+            "each sandbox")
+
+
+def _f_unattributed(ctx):
+    """the host registry's active openshell bindings with no sandbox in
+    the fleet's workspace. Each is confirmed with show(workspace, name): the
+    same logical_id is "registered, no sandbox"; anything else is "not
+    attributable to the workspace". None is dropped."""
+    gone = _inherit(ctx, "registry", "listed_names", "workspace")
+    if gone:
+        return gone
+    cfg, ws = ctx.value("registry"), ctx.value("workspace")
+    listed = host_registry.list_bindings(cfg)
+    if listed.kind != host_registry.BOUND:
+        return (_unresolved(f"the host registry's list: {listed.kind} "
+                            f"{listed.code or ''} {listed.detail}"),
+                "the host registry's list")
+    have = set(ctx.value("listed_names"))     # this workspace's sandboxes
+    orphans: List[str] = []
+    strangers: List[str] = []
+    for b in listed.bindings:
+        if b.get("adapter") != host_registry.ADAPTER or \
+                b.get("state") != "active":
+            continue
+        # Every active binding is asked about, whether or not a sandbox of
+        # its name exists: a same-name sandbox must not hide another key's
+        # binding. Only show(workspace, name) answering with this very
+        # logical_id makes a binding this workspace's.
+        look = host_registry.show(cfg, ws, b["name"])
+        mine = (look.kind == host_registry.BOUND
+                and look.binding["logical_id"] == b["logical_id"])
+        if not mine:
+            strangers.append(f"{b['name']} ({b['logical_id']})")
+        elif b["name"] not in have:
+            orphans.append(f"{b['name']} ({b['logical_id']})")
+    return ({"orphans": orphans, "strangers": strangers},
+            "the host registry's list, each binding without a sandbox "
+            "confirmed by show in the workspace")
 
 
 def _real(path: str) -> str:
@@ -898,6 +1192,13 @@ _OURS: Dict[str, Callable[["Ctx"], Tuple[Any, str]]] = {
     "interceptor_registration": _f_interceptor_registration,
     "negotiated_interceptors": _f_negotiated_interceptors,
     "probe_refused": _f_probe_refused, "probe_outcome": _f_probe_outcome,
+    "registry": _f_registry, "registry_layout": _f_registry_layout,
+    "registry_speaks": _f_registry_speaks,
+    "registry_bindings": _f_registry_bindings,
+    "registration_problems": _f_registration_problems,
+    "identity_extras": _f_identity_extras,
+    "identity_mounts": _f_identity_mounts,
+    "running_identity": _f_running_identity, "unattributed": _f_unattributed,
 }
 
 for _name in _OURS:
@@ -1070,6 +1371,89 @@ def _lanes_hold(expected: Mapping[str, Sequence[str]],
     return True
 
 
+def _registry_on(ctx: Ctx) -> bool:
+    fleet = ctx.value("fleet")
+    return not isinstance(fleet, Unresolved) and policy.uses_registry(fleet)
+
+
+def _verify_registry_host(ctx: Ctx) -> Iterator[Check]:
+    """D27, host-wide. Only a fleet that uses the host registry gets these."""
+    yield check(
+        claim="the host registry's config, owners, modes and layout are sound",
+        expected=ctx.fact("empty"),
+        actual=ctx.value("registry_layout"),
+        remedy="fix what is named: host-registry.json is the operator's, the "
+               "registry's files and the identity root belong to the operator "
+               "uid, and the identity root is its own tree",
+        do_not="do not loosen a mode or point identity_root at instances/: "
+               "the router there still keys instances by name")
+    yield check(
+        claim="the host registry speaks the configured interface",
+        expected=ctx.fact("true"),
+        actual=ctx.value("registry_speaks"),
+        remedy="check host-registry.json's interface against the registry's "
+               "version; every registry check below is UNKNOWN until it does")
+    found = ctx.value("unattributed")
+    yield check(
+        claim="every registered identity of this workspace has a sandbox",
+        expected=ctx.fact("empty"),
+        actual=_map(found, lambda d: d["orphans"]),
+        remedy="registered, no sandbox: provision it again (the registration "
+               "is reused), or retire the identity with the registry's own "
+               "operator verb",
+        do_not="do not retire an identity to tidy up: a retired name is "
+               "never reissued")
+    yield check(
+        claim="every openshell identity without a sandbox here is "
+              "attributable to this workspace",
+        expected=ctx.fact("empty"),
+        actual=_map(found, lambda d: d["strangers"]),
+        remedy="not attributable to this workspace: the registry binds it to "
+               "another workspace or key. Find its owner before acting on it",
+        do_not="do not assume it is this fleet's")
+
+
+def _verify_member_registry(ctx: Ctx, name: str) -> Iterator[Check]:
+    """D27, per member."""
+    yield check(
+        claim=f"{name}: its host registry identity is registered, delivered "
+              f"and matches fleet.json",
+        expected=ctx.fact("empty"),
+        actual=ctx.of("registration_problems", name).value,
+        remedy=f"a member that predates the registry, or whose name.json is "
+               f"stale, is provisioned again: `deprovision {name} --apply`, "
+               f"then `provision {name} --apply`",
+        do_not="do not edit name.json: the registry writes it, and the "
+               "sandbox checks it against what the host rendered")
+    yield check(
+        claim=f"{name}: its identity directory holds name.json and nothing "
+              f"else",
+        expected=ctx.fact("empty"),
+        actual=ctx.of("identity_extras", name).value,
+        remedy="extra entries in the identity directory: find what wrote "
+               "them. Only the registry writes there",
+        do_not="do not delete name.json with them")
+    yield check(
+        claim=f"{name}: the identity directory is mounted read-only, as a "
+              f"directory, at its own target, and nothing mounts the registry",
+        expected=ctx.fact("empty"),
+        actual=ctx.of("identity_mounts", name).value,
+        remedy=f"the mount set is fixed at create: `deprovision {name} "
+               f"--apply`, then `provision {name} --apply`",
+        do_not="do not bind name.json alone: the registry replaces it by "
+               "rename, and a single-file bind keeps the old file")
+    yield check(
+        claim=f"{name}: the running delivery daemon has the binding's "
+              f"identity and address",
+        expected=ctx.fact("empty"),
+        actual=ctx.of("running_identity", name).value,
+        remedy=f"name.json changed since create (an override or a "
+               f"re-enroll), or the sandbox predates it: `deprovision {name} "
+               f"--apply`, then `provision {name} --apply`",
+        do_not="do not set AMAP_SELF by hand: the address comes only from "
+               "name.json")
+
+
 def verify_members(ctx: Ctx) -> Iterator[Check]:
     names = ctx.value("fleet_members")
     if isinstance(names, Unresolved):
@@ -1077,8 +1461,13 @@ def verify_members(ctx: Ctx) -> Iterator[Check]:
                       expected=ctx.fact("true"), reason=names.reason,
                       remedy="run `install --apply`, or fix fleet.json")
         return
+    registry = _registry_on(ctx)
+    if registry:
+        yield from _verify_registry_host(ctx)
     for name in names:
         yield from _verify_member(ctx, name)
+        if registry:
+            yield from _verify_member_registry(ctx, name)
 
 
 def _verify_member(ctx: Ctx, name: str) -> Iterator[Check]:

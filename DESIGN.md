@@ -69,6 +69,7 @@ $AMAP_OPENSHELL_HOME/
 | `/opt/amap/lanes/outbox` | read-write | the drop-box that `inbox-submit` writes |
 
 The lane names are the router's (`router.config.LANES` in amap-router-local), and `render.py` renders exactly these targets.
+A fleet that sets `"identity": "registry"` gets one more row, read-only: `/opt/amap/identity`, the host registry's identity directory holding `name.json` (section 10, D27).
 
 **One uid for everything.** Every sandbox runs as the same non-root uid:gid
 as the router container. It is set as `process.run_as_user` and
@@ -322,3 +323,161 @@ tracks it.
 
 **Several hosts and several operators.** Both lists above.
 
+## 10. The host registry (D27)
+
+**What it is.** A host may run a host registry: the host's single writer of
+agent identities, a separate program this repository neither ships nor names.
+Its adapter interface is `version`, `register`, `show` and `list`, run as a
+command that reads one JSON request and writes one JSON line. This repository
+is its OpenShell adapter, and registration is operator-driven, by `provision`
+(D17). Nothing here imports the registry or amap-deploy-sandy's adapter for it.
+
+**Opt-in.** A fleet uses it only with `"identity": "registry"` in `fleet.json`,
+the key amap-deploy-sandy's policy carries too. Without the key, or with
+`"legacy"`, every rendering, interceptor decision and `verify` finding is what
+it was before D27, byte for byte (`tests/test_registry_off.py`). With it, a
+config that is missing or broken fails closed everywhere, and removing the
+config never falls back to the legacy behaviour.
+
+**The config.** `$AMAP_OPENSHELL_HOME/host-registry.json` is the operator's
+file and is never committed. It holds:
+
+- `python`, `checkout`, `registry` and `identity_root` (absolute paths);
+- `interface`, `module` and `name_schema` (opaque tokens, compared and never
+  parsed).
+
+The file must be owned by the operator, not group- or world-writable, with no
+such ancestor, and outside every bound source. `python` and `checkout` get the
+same checks, and `python` is named by its real path. `identity_root` has no
+group- or world-writable ancestor. A duplicate member name anywhere is refused:
+the config, every registry answer and `name.json` are read by one strict
+reader, `payload/identity-check`'s. `install` creates `identity_root`.
+
+**The command.** `python -E -s -m <module> --registry <registry>`, run with the
+checkout as its working directory, no shell, a minimal fixed environment and a
+timeout. The answer must be exactly one line holding one JSON object.
+
+**Ownership and layout.** The registry directory, its journal, snapshot and
+lock (when present) and `identity_root` belong to the operator uid, which is
+the registry writer's. The registry's overlay file is root-owned by design and
+is never checked. `host.json` is checked only for being a readable regular
+file. `identity_root` is a tree of its own: it is never at, under or above
+`instances/` or the registry directory, decided by comparing (st_dev, st_ino)
+along the ancestor chains. A symlink in a compared path, or a path that cannot
+be inspected, refuses.
+
+**The status table.** Every answer is classified, on its `ok` and `committed`
+members and never on the exit status:
+
+| Answer | Before the first register | After it |
+|---|---|---|
+| `not_found` | unbound: the pre-check, then register | refuse |
+| `registry_absent` | a fresh host only when `identity_root` is empty, the registry has no journal, and `registry-members.json` records nothing; otherwise UNKNOWN | UNKNOWN |
+| `unreadable`, `invalid` | UNKNOWN: stop, never empty | UNKNOWN |
+| `config_absent`, `instances_dir_absent`, `adapter_not_configured`, `interface` | broken config: fail closed | refuse |
+| `bad_request` | this repository's defect | the same |
+| anything else, or no usable answer | UNKNOWN | UNKNOWN |
+
+`register` gives one of four outcomes:
+
+- REGISTERED;
+- UNDELIVERED (`committed: true`);
+- UNKNOWN (`committed: "unknown"`, or no usable answer);
+- REFUSED.
+
+UNDELIVERED and UNKNOWN are retried once, and `register` is idempotent. `provision` adds the name to `registry-members.json` before it
+asks the registry to register it, so a crash after the registry commits still
+marks the host as not fresh. The record is written durably (a unique
+temporary file, fsynced, renamed, and the directory fsynced) and read only
+when it is the operator's, not group- or world-writable, and exactly
+`{"names": [...]}`. A binding whose `name.json` is not current is registered
+again on the next `provision`: only `register` redelivers it.
+
+**provision.** With the switch on:
+
+1. **The pre-check.** `show` (workspace, name). A binding under another name
+   refuses. When unbound, `list` refuses if any binding, active or retired,
+   holds the name, so no name is ever minted by mistake: names are reserved
+   forever.
+2. **`register`.** Then the gate: an active binding, `name.json` current and
+   checked by the sandbox's own validator, the identity directory exactly
+   `identity_root/<logical_id>` (operator-owned, 0755, not a symlink), and the
+   interim rule below.
+3. **`sandbox create`.** Only after the gate passes. Then `register` again,
+   with the sandbox id as the incarnation.
+
+`deprovision` and `teardown` never retire: retiring is the registry's own
+operator verb. A registration can outlive a failed create. A retry reuses it,
+and `verify` reports it. Two residuals remain, and the post-check catches
+both:
+
+- a registration that races the pre-check;
+- a name held only as an earlier name of an overridden binding.
+
+**Inside the sandbox.** The identity directory is bound read-only, as a
+directory and never as `name.json` alone, at `/opt/amap/identity`. The
+registry replaces the file by rename, which a single-file bind would not see.
+The create sets these variables in place of `AMAP_SELF_ADDRESS` and
+`AMAP_SELF`:
+
+- `AMAP_IDENTITY_DIR`;
+- `AMAP_IDENTITY` (the schema id);
+- `AMAP_IDENTITY_NAME`, `AMAP_IDENTITY_ADDRESS`, `AMAP_IDENTITY_LOGICAL_ID`
+  and `AMAP_IDENTITY_EPOCH`.
+
+`payload/amap-main` then runs `payload/identity-check`. It requires:
+
+- `AMAP_IDENTITY_DIR` to be exactly `/opt/amap/identity`;
+- `name.json` to be exactly the five-member document (`schema`, `name`,
+  `address`, `logical_id` and `epoch`), each value equal to the rendered one.
+
+Only then does it export `AMAP_DELIVERY_SELF` and `AMAP_SELF` from it and
+start the delivery daemon and `claude`. Otherwise it holds, re-checking, and
+never falls back to another address. The connector is unchanged: it already
+reads those two variables.
+
+**The interceptor.** For a member's create, it sends the registry one question,
+`show`. Nothing in `interceptor/` can build any other request. It then
+requires:
+
+- the identity row, exactly: source, target and read-only, a real directory;
+- no other target equal to, under or above `/opt/amap/identity`;
+- no source at, under or above the registry directory;
+- the identity variables equal to the binding, in `spec.environment` and in
+  `spec.template.environment` alike, with no self-address variable in either.
+
+**The interim rule.** The router still takes an instance's address from its
+lane directory's name, so until it keys instances by logical_id the registry's
+name must be the sandbox name and its address `<name>@<fleet_domain>`. That
+means one domain per registry. The rule has no switch. It is replaced only by
+the later change that keys the router by logical_id.
+
+**verify.** With the switch on, it adds:
+
+- **Host-wide:**
+  - the config, owners, modes and layout;
+  - the interface the registry speaks (every registry check is UNKNOWN
+    until it does);
+  - "registered, no sandbox", for each binding of this workspace that `show`
+    confirms has no sandbox;
+  - "not attributable to this workspace", for each that `show` does not
+    confirm. None is dropped.
+- **Per member:**
+  - the registration and its `name.json`;
+  - extra entries in the identity directory;
+  - the live identity mount, including "never a single-file bind" and
+    "predates its registration";
+  - the running daemon's identity and address. An override or a re-enroll
+    changes `name.json`, and the remedy is to provision the member again.
+
+**Residual risk.** The interceptor runs as the operator uid, which is the
+registry writer's, so a compromised interceptor already holds writer
+authority. D27 adds one `show` per create and one trusted input, its answer.
+A separate uid is the fix. It is deferred with the shared-uid question (D7).
+
+**Spec.** No Namespace path, lane or writer changes, and the identity directory
+is outside every Namespace. The router still knows each Namespace's agent-id
+from its own configuration, never from anything the agent writes
+(draft-rapp-amap-00, "Volume Layout", 4.1). `name.json` is not the draft's
+Binding Record (section 9), and no enforcement depends on it: in-sandbox it
+only sets the address the connector uses to mark its own agent.

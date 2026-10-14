@@ -46,7 +46,8 @@ DEFAULT_FLAGS: Dict[str, Any] = {
     "write_opens": "", "no_delivery": "", "fail_exec": "",
     "fail_docker_ps": False, "fail_inspect": False, "extra_mount": "",
     "router_absent": False, "router_stopped": False, "router_posture": [],
-    "policy_append": {}, "gateway_info": "ok", "interceptor": "refuse"}
+    "policy_append": {}, "gateway_info": "ok", "interceptor": "refuse",
+    "stale_env": ""}
 PROGRAMS = ("openshell", "docker")
 PROBE_MARK = "# amap-openshell verify: "
 PROVIDER_HOST = "api.anthropic.com"
@@ -298,6 +299,8 @@ def _openshell(st: Dict[str, Any], path: str, argv: List[str]) -> int:
                 box["policy_text"] = realistic_policy(fh.read())
         if config:
             box["mounts"] = json.loads(config)["docker"]["mounts"]
+        box["env"] = dict(rest[i + 1].split("=", 1)
+                          for i, w in enumerate(rest) if w == "--env")
         boxes[name] = box
         save()
         print(f"created {name}")
@@ -351,6 +354,15 @@ def _exec(st: Dict[str, Any], argv: List[str]) -> int:
             print("EROFS" if mount is None or mount["read_only"] else "OPENED")
     elif kind == "delivery-probe":
         print(0 if flags["no_delivery"] == name else 1)
+    elif kind == "env-probe":
+        # D27: the daemon's environment is the create's, plus what
+        # payload/amap-main exports from name.json (its address, twice).
+        env = dict(box.get("env", {}))
+        address = env.get("AMAP_IDENTITY_ADDRESS", env.get("AMAP_SELF_ADDRESS"))
+        env["AMAP_DELIVERY_SELF"] = env["AMAP_SELF"] = address
+        if flags["stale_env"] == name:
+            env["AMAP_IDENTITY_EPOCH"] = "0"
+        print(json.dumps([{k: env.get(k) for k in args[1:]}]))
     else:
         return _complain(f"fake openshell: unknown probe {kind!r}")
     with open(st["calls"] + ".probes", "a", encoding="utf-8") as fh:

@@ -342,6 +342,24 @@ def gateway_fragment(home: str) -> str: ...         # the TOML of section 6
 `evaluate` refuses (as a denial result) any RPC other than CreateSandbox and any
 phase other than validate, and turns an exception from the rule into a denial.
 
+**With the host registry (DESIGN.md section 10, D27).** When `fleet.json` sets
+`"identity": "registry"`, a member's create is no longer pure: the rule asks
+the registry one read-only question, `show`, and nothing in `interceptor/` can
+build another. Anything but an active binding with a current `name.json`
+refuses. The rule then refuses unless all of these hold:
+
+- the member's identity directory is bound exactly once, at
+  `/opt/amap/identity`, read-only, as a real directory: never `name.json`
+  alone;
+- no other target is at, under or above that target;
+- no source is at, under or above the registry's directory (by filesystem
+  identity);
+- the identity variables equal the binding, in `spec.environment` and in
+  `spec.template.environment` alike;
+- neither environment carries `AMAP_SELF_ADDRESS` or `AMAP_SELF`.
+
+Without the key the rule is unchanged, and the registry is never asked.
+
 ## 5. A refused request: another member's outbox
 
 The members are `alpha` and `beta` from `examples/fleet.json`, whose workspace is

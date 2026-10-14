@@ -19,6 +19,9 @@
 #
 #   AMAP_INBOX_DIR, AMAP_PEER_DIR, AMAP_OUTBOX_DIR   required: the lane mounts
 #   AMAP_SELF_ADDRESS    optional: this agent's address, <name>@<fleet_domain>
+#   AMAP_IDENTITY_DIR and the other AMAP_IDENTITY* variables
+#                        with the host registry only (D27), in place of
+#                        AMAP_SELF_ADDRESS: see payload/identity-check
 #   ANTHROPIC_API_KEY    required by claude-seed: the provider's placeholder
 #                        (OpenShell main@acbac9c:
 #                        docs/how-it-works/providers/overview.mdx:366-369)
@@ -60,10 +63,27 @@ AMAP_DELIVERY_OUTCOME_DIR="$AMAP_OUTBOX_DIR/ext/claude-code/outcomes"
 AMAP_DELIVERY_SESSION_SOURCE="$SELF_DIR/openshell-sessions"
 export AMAP_DELIVERY_MAIL_NOTICE_DIR AMAP_DELIVERY_MAIL_CLAIM AMAP_DELIVERY_PEER_NOTICE_DIR AMAP_DELIVERY_PEER_MESSAGE_DIR AMAP_DELIVERY_PEER_CLAIM AMAP_DELIVERY_STATE_DIR AMAP_DELIVERY_OUTCOME_DIR AMAP_DELIVERY_SESSION_SOURCE
 
+# The host registry (DESIGN.md D27). When the host rendered AMAP_IDENTITY_DIR,
+# the address comes only from name.json in the read-only identity directory,
+# and only once identity-check finds there exactly the identity the host
+# rendered (its AMAP_IDENTITY* variables, the directory /opt/amap/identity
+# and nothing else). Until then nothing starts: no daemon, no claude. The
+# check repeats every IDENTITY_RECHECK_SECONDS, and there is no fallback to
+# AMAP_SELF_ADDRESS.
+IDENTITY_RECHECK_SECONDS=5
+if [ -n "${AMAP_IDENTITY_DIR+x}" ]; then
+    unset AMAP_SELF_ADDRESS AMAP_SELF
+    while ! address=$(python3 -I "$SELF_DIR/identity-check" </dev/null); do
+        echo "amap-main: holding: the identity does not check, so nothing starts" >&2
+        sleep "$IDENTITY_RECHECK_SECONDS" </dev/null
+    done
+    AMAP_DELIVERY_SELF=$address
+    AMAP_SELF=$address
+    export AMAP_DELIVERY_SELF AMAP_SELF
 # The address is optional because the daemon keeps it optional: a fleet with
 # no fleet_domain has no peer lane and no address. Set but empty is a bad
 # render, and fatal.
-if [ -n "${AMAP_SELF_ADDRESS+x}" ]; then
+elif [ -n "${AMAP_SELF_ADDRESS+x}" ]; then
     : "${AMAP_SELF_ADDRESS:?amap-main: AMAP_SELF_ADDRESS is set but empty; the host rendered no address}"
     AMAP_DELIVERY_SELF=$AMAP_SELF_ADDRESS
     export AMAP_DELIVERY_SELF
