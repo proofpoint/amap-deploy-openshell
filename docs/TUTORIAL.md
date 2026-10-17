@@ -112,7 +112,7 @@ printed. It refuses a checkout with local changes, naming it. Without
 |---|---|
 | amap-router-local | `e43dbba` |
 | amap-connector-claude | `37875a5` |
-| amap-deploy-sandy | `eeecad0` |
+| amap-deploy-sandy | `f9d62fd` |
 | amap-spec | not pinned |
 
 This repository finds the siblings by looking beside itself; the variables
